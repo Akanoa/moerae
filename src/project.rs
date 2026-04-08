@@ -27,6 +27,10 @@ impl Moerae {
         &self.db
     }
 
+    pub fn model(&self) -> &EmbeddingModel {
+        &self.model
+    }
+
     pub fn init(project_id: &str) -> Result<Self, InitError> {
         let model_path = model::default_model_path();
         Self::init_internal(project_id, None, Some(&model_path))
