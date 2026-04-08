@@ -2,6 +2,16 @@
 name = "moerae"
 version = "0.1.0"
 edition = "2024"
+repository = "https://github.com/Akanoa/moerae"
+authors = ["Yannick Guern"]
+description = "AI memory system with put/search API and segment lifecycle"
+license = "MIT"
+
+[package.metadata.wix]
+upgrade-guid = "7BA31E8A-BBF7-479D-8D37-1FBF5FA531D9"
+path-guid = "6D59FDA9-7D4F-4A86-B0EE-B27D978BCF0E"
+license = false
+eula = false
 
 [dependencies]
 rusqlite = { version = "0.32", features = ["bundled"] }
@@ -30,3 +40,8 @@ path = "src/bin/bench.rs"
 
 [dev-dependencies]
 tempfile = "3"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

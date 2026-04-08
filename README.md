@@ -6,6 +6,46 @@
 
 Moerae embeds content locally using [embeddinggemma-300m](https://huggingface.co/ggml-org/embeddinggemma-300m-qat-q8_0-GGUF), stores it in SQLite with [usearch](https://github.com/unum-cloud/usearch) HNSW indexes, and manages segment lifecycle automatically: segments close at capacity, get evicted when stale, and promote to project scope when useful.
 
+## Installation
+
+### Linux / macOS (curl | sh)
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Akanoa/moerae/releases/latest/download/moerae-installer.sh | sh
+```
+
+### Windows (PowerShell)
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://github.com/Akanoa/moerae/releases/latest/download/moerae-installer.ps1 | iex"
+```
+
+### Debian / Ubuntu
+
+```sh
+# Download the .deb for your architecture (amd64 or arm64)
+curl -LO https://github.com/Akanoa/moerae/releases/latest/download/moerae_0.1.0_amd64.deb
+sudo dpkg -i moerae_0.1.0_amd64.deb
+```
+
+### Fedora / RHEL
+
+```sh
+# Download the .rpm for your architecture (x86_64 or aarch64)
+curl -LO https://github.com/Akanoa/moerae/releases/latest/download/moerae-0.1.0.x86_64.rpm
+sudo rpm -i moerae-0.1.0.x86_64.rpm
+```
+
+### Windows (MSI)
+
+Download `moerae-x86_64-pc-windows-msvc.msi` from the [latest release](https://github.com/Akanoa/moerae/releases/latest).
+
+### From source
+
+```sh
+cargo install --git https://github.com/Akanoa/moerae.git
+```
+
 ## Quick Start
 
 ### Install the model
