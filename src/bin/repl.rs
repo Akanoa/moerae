@@ -532,9 +532,6 @@ fn init_project(project_id: &str, log_guard: &mut StderrGuard) -> Moerae {
         Err(e) => {
             log_guard.restore();
             eprintln!("Failed to init: {e}");
-            eprintln!(
-                "Make sure the model is at: ~/.moerae/models/embeddinggemma-300m-qat-q8_0.gguf"
-            );
             std::process::exit(1);
         }
     }

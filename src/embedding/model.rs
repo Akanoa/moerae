@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -30,7 +30,7 @@ pub struct EmbeddingModel {
 impl EmbeddingModel {
     pub fn load(path: &Path) -> Result<Self, InitError> {
         if !path.exists() {
-            return Err(InitError::ModelNotFound(path.to_path_buf()));
+            download_model(path)?;
         }
 
         let backend = get_backend();
@@ -124,6 +124,58 @@ pub fn default_model_path() -> PathBuf {
     };
     base.join("models")
         .join("embeddinggemma-300m-qat-q8_0.gguf")
+}
+
+const MODEL_URL: &str = "https://huggingface.co/ggml-org/embeddinggemma-300m-qat-q8_0-GGUF/resolve/main/embeddinggemma-300m-qat-Q8_0.gguf";
+
+fn download_model(path: &Path) -> Result<(), InitError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    eprintln!("Model not found, downloading embeddinggemma-300m...");
+
+    let response = ureq::get(MODEL_URL)
+        .call()
+        .map_err(|e| InitError::ModelDownloadFailed(e.to_string()))?;
+
+    let total_size = response
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok());
+
+    let tmp_path = path.with_extension("gguf.tmp");
+    let mut file = fs::File::create(&tmp_path)?;
+    let mut reader = response.into_body().into_reader();
+    let mut downloaded: u64 = 0;
+    let mut buf = [0u8; 64 * 1024];
+    let mut last_pct = 0;
+
+    loop {
+        let n = reader
+            .read(&mut buf)
+            .map_err(|e| InitError::ModelDownloadFailed(e.to_string()))?;
+        if n == 0 {
+            break;
+        }
+        file.write_all(&buf[..n])?;
+        downloaded += n as u64;
+
+        if let Some(total) = total_size {
+            let pct = (downloaded * 100 / total) as u8;
+            if pct != last_pct {
+                last_pct = pct;
+                eprint!("\rDownloading model... {pct}% ({downloaded}/{total} bytes)");
+            }
+        }
+    }
+    drop(file);
+
+    fs::rename(&tmp_path, path)?;
+    eprintln!("\rModel downloaded to {}", path.display());
+
+    Ok(())
 }
 
 fn compute_model_id(path: &Path, dimensions: usize) -> Result<String, InitError> {

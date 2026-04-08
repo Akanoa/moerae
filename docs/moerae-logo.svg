@@ -1,0 +1,35 @@
+<svg width="2000" height="504" viewBox="0 0 680 400" xmlns="http://www.w3.org/2000/svg">
+  <!-- Central symbol: three threads braiding into a unified form -->
+  <g transform="translate(340, 160)">
+    <!-- Thread 1 (Clotho — spinner, purple) -->
+    <path d="M-60 -70 C-30 -70, -10 -30, 0 0 S30 70, 60 70" fill="none" stroke="#7F77DD" stroke-width="4" stroke-linecap="round"/>
+    <!-- Thread 2 (Lachesis — measurer, teal) -->
+    <path d="M-70 0 C-40 -40, -10 -10, 0 0 S40 40, 70 0" fill="none" stroke="#1D9E75" stroke-width="4" stroke-linecap="round"/>
+    <!-- Thread 3 (Atropos — cutter, coral) -->
+    <path d="M-60 70 C-30 70, -10 30, 0 0 S30 -70, 60 -70" fill="none" stroke="#D85A30" stroke-width="4" stroke-linecap="round"/>
+
+    <!-- Central convergence point -->
+    <circle cx="0" cy="0" r="8" fill="#534AB7"/>
+    <circle cx="0" cy="0" r="3.5" fill="#EEEDFE"/>
+
+    <!-- Endpoint nodes — thread origins -->
+    <circle cx="-60" cy="-70" r="4" fill="#AFA9EC"/>
+    <circle cx="-70" cy="0" r="4" fill="#5DCAA5"/>
+    <circle cx="-60" cy="70" r="4" fill="#F0997B"/>
+
+    <!-- Endpoint nodes — thread destinations -->
+    <circle cx="60" cy="70" r="4" fill="#AFA9EC"/>
+    <circle cx="70" cy="0" r="4" fill="#5DCAA5"/>
+    <circle cx="60" cy="-70" r="4" fill="#F0997B"/>
+
+    <!-- Subtle vector similarity arcs between endpoints -->
+    <path d="M-60 -70 Q-80 0 -60 70" fill="none" stroke="#7F77DD" stroke-width="0.5" opacity="0.2" stroke-dasharray="3 4"/>
+    <path d="M60 -70 Q80 0 60 70" fill="none" stroke="#D85A30" stroke-width="0.5" opacity="0.2" stroke-dasharray="3 4"/>
+  </g>
+
+  <!-- Wordmark with ligatures -->
+  <text x="340" y="300" text-anchor="middle" font-family="'Inter', 'Helvetica Neue', Arial, sans-serif" font-size="42" font-weight="500" letter-spacing="3" fill="#2C2C2A">MŒRÆ</text>
+
+  <!-- Tagline -->
+  <text x="340" y="328" text-anchor="middle" font-family="'Inter', 'Helvetica Neue', Arial, sans-serif" font-size="11" font-weight="600" letter-spacing="3" fill="#424242" opacity="0.6">PULL THE RIGHT THREAD</text>
+</svg>

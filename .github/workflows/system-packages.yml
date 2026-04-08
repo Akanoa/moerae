@@ -1,0 +1,113 @@
+# Build .deb and .rpm packages from release binaries
+# Triggers after cargo-dist creates a GitHub Release
+name: System Packages
+
+permissions:
+  contents: write
+
+on:
+  release:
+    types: [published]
+
+env:
+  PACKAGE_NAME: moerae
+  PACKAGE_DESCRIPTION: "AI memory system with put/search API and segment lifecycle"
+  PACKAGE_LICENSE: "MIT"
+  PACKAGE_MAINTAINER: "Yannick Guern"
+
+jobs:
+  build-system-packages:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            arch_deb: amd64
+            arch_rpm: x86_64
+            runner: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            arch_deb: arm64
+            arch_rpm: aarch64
+            runner: ubuntu-22.04
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install nfpm
+        run: |
+          echo 'deb [trusted=yes] https://repo.goreleaser.com/apt/ /' | sudo tee /etc/apt/sources.list.d/goreleaser.list
+          sudo apt-get update
+          sudo apt-get install -y nfpm
+
+      - name: Download release archive
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          mkdir -p /tmp/release /tmp/extracted
+
+          # Download the tar.xz archive matching this target
+          gh release download "$TAG" --pattern "${PACKAGE_NAME}-${TARGET}.tar.xz" --dir /tmp/release
+
+          tar xf "/tmp/release/${PACKAGE_NAME}-${TARGET}.tar.xz" -C /tmp/extracted --strip-components=1
+
+      - name: Prepare package tree
+        run: |
+          mkdir -p /tmp/pkg/usr/bin
+          cp /tmp/extracted/moerae /tmp/pkg/usr/bin/
+          cp /tmp/extracted/moerae-repl /tmp/pkg/usr/bin/
+          cp /tmp/extracted/moerae-bench /tmp/pkg/usr/bin/
+          chmod 755 /tmp/pkg/usr/bin/*
+
+      - name: Extract version
+        id: version
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          # Strip leading 'v' if present
+          VERSION="${TAG#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Generate nfpm config
+        run: |
+          cat > /tmp/nfpm.yaml <<NFPMEOF
+          name: "${PACKAGE_NAME}"
+          arch: "${ARCH_NFPM}"
+          version: "${{ steps.version.outputs.version }}"
+          maintainer: "${PACKAGE_MAINTAINER}"
+          description: "${PACKAGE_DESCRIPTION}"
+          license: "${PACKAGE_LICENSE}"
+          homepage: "https://github.com/Akanoa/moerae"
+          contents:
+            - src: /tmp/pkg/usr/bin/moerae
+              dst: /usr/bin/moerae
+            - src: /tmp/pkg/usr/bin/moerae-repl
+              dst: /usr/bin/moerae-repl
+            - src: /tmp/pkg/usr/bin/moerae-bench
+              dst: /usr/bin/moerae-bench
+          NFPMEOF
+        env:
+          ARCH_NFPM: ${{ matrix.arch_deb }}
+
+      - name: Build .deb package
+        run: |
+          nfpm package --config /tmp/nfpm.yaml --packager deb --target /tmp/out/
+        env:
+          ARCH_NFPM: ${{ matrix.arch_deb }}
+
+      - name: Build .rpm package
+        run: |
+          # nfpm uses the arch field, override for rpm
+          sed -i "s/arch: .*/arch: \"${{ matrix.arch_rpm }}\"/" /tmp/nfpm.yaml
+          nfpm package --config /tmp/nfpm.yaml --packager rpm --target /tmp/out/
+
+      - name: Upload packages to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          gh release upload "$TAG" /tmp/out/*.deb /tmp/out/*.rpm --clobber

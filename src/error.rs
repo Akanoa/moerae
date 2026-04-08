@@ -5,6 +5,8 @@ use std::path::PathBuf;
 pub enum InitError {
     #[error("model not found: {0}")]
     ModelNotFound(PathBuf),
+    #[error("model download failed: {0}")]
+    ModelDownloadFailed(String),
     #[error("model load failed: {0}")]
     ModelLoadFailed(String),
     #[error("storage initialization failed: {0}")]
