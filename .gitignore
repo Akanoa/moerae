@@ -1,7 +1,10 @@
 _bmad
 .claude
 
-
 # Added by cargo
-
 /target
+
+# Benchmark artifacts
+bench/output/
+bench/results/
+bench/beam-data/

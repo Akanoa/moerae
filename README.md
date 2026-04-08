@@ -1,18 +1,44 @@
-# Moerae
+<div style="text-align: center;">
+    <img src="docs/moerae-logo.svg" alt="Moerae">
+</div>
 
-A queryable hierarchical AI memory system for AI agents. Two verbs: `put` and `search`. No files, no manual indexing, no context window management. Put content in, search it later. Lifecycle handles the rest.
+<p align="center">A queryable hierarchical AI memory system for AI agents.<br>Two verbs: <code>put</code> and <code>search</code>. No files, no manual indexing, no context window management.<br>Put content in, search it later. Lifecycle handles the rest.</p>
 
 Moerae embeds content locally using [embeddinggemma-300m](https://huggingface.co/ggml-org/embeddinggemma-300m-qat-q8_0-GGUF), stores it in SQLite with [usearch](https://github.com/unum-cloud/usearch) HNSW indexes, and manages segment lifecycle automatically: segments close at capacity, get evicted when stale, and promote to project scope when useful.
 
-## Quick Start
+## Installation
 
-### Install the model
+### Linux / macOS (curl | sh)
 
 ```sh
-mkdir -p ~/.moerae/models
-curl -L -o ~/.moerae/models/embeddinggemma-300m-qat-q8_0.gguf \
-  "https://huggingface.co/ggml-org/embeddinggemma-300m-qat-q8_0-GGUF/resolve/main/embeddinggemma-300m-qat-Q8_0.gguf"
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Akanoa/moerae/releases/latest/download/moerae-installer.sh | sh
 ```
+
+### Debian / Ubuntu
+
+```sh
+# Download the .deb for your architecture (amd64 or arm64)
+curl -LO https://github.com/Akanoa/moerae/releases/latest/download/moerae_0.1.0_amd64.deb
+sudo dpkg -i moerae_0.1.0_amd64.deb
+```
+
+### Fedora / RHEL
+
+```sh
+# Download the .rpm for your architecture (x86_64 or aarch64)
+curl -LO https://github.com/Akanoa/moerae/releases/latest/download/moerae-0.1.0.x86_64.rpm
+sudo rpm -i moerae-0.1.0.x86_64.rpm
+```
+
+### From source
+
+```sh
+cargo install --git https://github.com/Akanoa/moerae.git
+```
+
+## Quick Start
+
+The embedding model is downloaded automatically on first use (~300MB).
 
 ### CLI
 
@@ -267,6 +293,22 @@ Search skips mismatched segments and reports `skipped_mismatched` in results.
 | `lru` | Index handle cache |
 | `rustyline` | REPL (history, autocomplete, hints) |
 | `libc` | Stderr redirection for log control |
+
+## Benchmark
+
+Moerae is benchmarked against [BEAM](https://github.com/mohammadtavakoli78/BEAM), a long-term memory evaluation suite with 2,000 probing questions across 100 conversations testing 10 memory abilities.
+
+On the 100K scale (20 conversations, 400 questions), Moerae achieves a mean top-1 cosine similarity of **0.86** with 96.5% of questions above 0.80. Knowledge update retrieval reaches **70% rubric coverage** at top-20, and information extraction reaches **42%**.
+
+| Category | Top-1 | Rubric@20 |
+|----------|-------|-----------|
+| knowledge update | 0.8824 | 70.0% |
+| information extraction | 0.8407 | 41.9% |
+| temporal reasoning | 0.8735 | 18.8% |
+| multi session reasoning | 0.8587 | 14.2% |
+| **overall (10 categories)** | **0.8602** | **16.2%** |
+
+Full analysis: [docs/benchmark-analysis.md](docs/benchmark-analysis.md). Benchmark pipeline: [BENCHMARK.md](BENCHMARK.md).
 
 ## License
 

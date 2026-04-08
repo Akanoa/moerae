@@ -1,0 +1,1 @@
+# No dependencies - uses `claude --print` via subprocess

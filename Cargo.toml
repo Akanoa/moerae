@@ -1,7 +1,11 @@
 [package]
 name = "moerae"
-version = "0.1.0"
+version = "0.2.1"
 edition = "2024"
+repository = "https://github.com/Akanoa/moerae"
+authors = ["Yannick Guern"]
+description = "AI memory system with put/search API and segment lifecycle"
+license = "MIT"
 
 [dependencies]
 rusqlite = { version = "0.32", features = ["bundled"] }
@@ -12,9 +16,10 @@ uuid = { version = "1", features = ["v4"] }
 sha2 = "0.10"
 lru = "0.12"
 llama-cpp-2 = "0.1"
-usearch = "2"
+usearch = { version = "2", default-features = false, features = ["fp16lib"] }
 rustyline = { version = "15", features = ["with-file-history"] }
 libc = "0.2"
+ureq = "3"
 
 [[bin]]
 name = "moerae"
@@ -24,5 +29,14 @@ path = "src/bin/moerae.rs"
 name = "moerae-repl"
 path = "src/bin/repl.rs"
 
+[[bin]]
+name = "moerae-bench"
+path = "src/bin/bench.rs"
+
 [dev-dependencies]
 tempfile = "3"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
