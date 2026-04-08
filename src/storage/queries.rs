@@ -150,6 +150,7 @@ pub fn get_segment_info(
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct SegmentInfo {
     pub segment_id: i64,
     pub conversation_id: String,

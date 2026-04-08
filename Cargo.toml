@@ -13,6 +13,16 @@ sha2 = "0.10"
 lru = "0.12"
 llama-cpp-2 = "0.1"
 usearch = "2"
+rustyline = { version = "15", features = ["with-file-history"] }
+libc = "0.2"
+
+[[bin]]
+name = "moerae"
+path = "src/bin/moerae.rs"
+
+[[bin]]
+name = "moerae-repl"
+path = "src/bin/repl.rs"
 
 [dev-dependencies]
 tempfile = "3"

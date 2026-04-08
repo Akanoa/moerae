@@ -170,11 +170,18 @@ pub fn rebuild_segment_index(db: &Database, segment_id: i64) -> Result<(), Strin
         .map_err(|e| e.to_string())?;
 
     if embeddings.is_empty() {
+        // No embeddings to rebuild from — mark segment unrecoverable by deleting it
+        queries::delete_segment(&db.conn, segment_id).map_err(|e| e.to_string())?;
         return Ok(());
     }
 
-    // Determine dimensions from first embedding
+    // Validate embedding data isn't corrupt (check first entry has valid size)
     let dims = embeddings[0].1.len() / 4; // f32 = 4 bytes
+    if dims == 0 || embeddings[0].1.len() % 4 != 0 {
+        // Corrupt embedding data — mark unrecoverable
+        queries::delete_segment(&db.conn, segment_id).map_err(|e| e.to_string())?;
+        return Ok(());
+    }
 
     let tmp_path = db.index_tmp_path(segment_id);
     let final_path = db.index_path(segment_id);

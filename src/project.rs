@@ -23,6 +23,10 @@ pub struct Moerae {
 }
 
 impl Moerae {
+    pub fn db(&self) -> &Database {
+        &self.db
+    }
+
     pub fn init(project_id: &str) -> Result<Self, InitError> {
         let model_path = model::default_model_path();
         Self::init_internal(project_id, None, Some(&model_path))
@@ -56,6 +60,13 @@ impl Moerae {
                 c
             }
         };
+
+        // Store project name in config for discovery
+        let _ = db.conn.execute(
+            "INSERT INTO config (id, data) VALUES (1, json_object('_project_id', ?1))
+             ON CONFLICT(id) DO UPDATE SET data = json_set(data, '$._project_id', ?1)",
+            [project_id],
+        );
 
         // Load embedding model
         let default_path = model::default_model_path();

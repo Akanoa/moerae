@@ -9,6 +9,7 @@ use crate::storage::schema;
 
 pub struct Database {
     pub conn: Connection,
+    #[allow(dead_code)]
     pub project_dir: PathBuf,
     pub indexes_dir: PathBuf,
 }

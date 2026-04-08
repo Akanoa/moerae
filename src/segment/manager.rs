@@ -43,16 +43,6 @@ impl SegmentManager {
         })
     }
 
-    pub fn refresh(&mut self, db: &Database) -> Result<(), String> {
-        self.segment_ids = queries::get_conversation_segments(&db.conn, &self.conversation_id)
-            .map_err(|e| e.to_string())?;
-        self.regular_open = queries::get_open_segment(&db.conn, &self.conversation_id, false)
-            .map_err(|e| e.to_string())?;
-        self.persist_open = queries::get_open_segment(&db.conn, &self.conversation_id, true)
-            .map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
     pub fn get_or_create_open_segment(
         &mut self,
         db: &Database,
