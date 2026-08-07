@@ -234,3 +234,181 @@ fn metadata_required_for_large_content() {
     let results = conv.search("long sentence", None, None).unwrap();
     assert!(!results.items.is_empty());
 }
+
+// --- forget ---
+
+#[test]
+#[ignore]
+fn forget_by_node_id_removes_from_search() {
+    let (m, _tmp) = test_moerae(None);
+    let uuid = {
+        let mut conv = m.create_conversation().unwrap();
+        conv.put("The API rate limit is 1000 req/min", None, false).unwrap();
+        conv.put("Rust is a systems programming language", None, false).unwrap();
+        conv.uuid.clone()
+    };
+
+    let conv = m.conversation(&uuid).unwrap();
+    let results = conv.search_debug("rate limit", None, None).unwrap();
+    let node_id = results.items[0].node_id;
+    assert!(results.items[0].data.contains("1000"));
+    drop(conv);
+
+    let outcome = m.forget_nodes(&[node_id]).unwrap();
+    assert_eq!(outcome.nodes_removed, 1);
+
+    let conv = m.conversation(&uuid).unwrap();
+    let after = conv.search("rate limit", None, None).unwrap();
+    assert!(
+        !after.items.iter().any(|i| i.node_id == node_id),
+        "forgotten node still returned by search"
+    );
+    // The sibling survived — the whole point of rewriting rather than dropping.
+    let rust = conv.search("Rust systems language", None, None).unwrap();
+    assert!(rust.items.iter().any(|i| i.data.contains("Rust")));
+}
+
+#[test]
+#[ignore]
+fn forget_by_query_plans_candidates() {
+    let (m, _tmp) = test_moerae(None);
+    let uuid = {
+        let mut conv = m.create_conversation().unwrap();
+        conv.put("The API rate limit is 1000 req/min", None, false).unwrap();
+        conv.put("API rate limit: 1000 per key per minute", None, false).unwrap();
+        conv.put("Postgres runs on port 5432", None, false).unwrap();
+        conv.uuid.clone()
+    };
+
+    let plan = m
+        .plan_forget_matching(Some(&uuid), "api rate limit", None, Some(50), 0.80)
+        .unwrap();
+
+    assert!(plan.targets.len() >= 2, "both rate-limit facts should match");
+    assert!(
+        plan.targets.iter().all(|t| t.score.unwrap() >= 0.80),
+        "min_score not enforced"
+    );
+    assert!(
+        !plan.targets.iter().any(|t| t.data.contains("Postgres")),
+        "unrelated fact matched"
+    );
+}
+
+#[test]
+#[ignore]
+fn forget_plan_does_not_boost_relevancy() {
+    let (m, _tmp) = test_moerae(None);
+    let uuid = {
+        let mut conv = m.create_conversation().unwrap();
+        conv.put("The API rate limit is 1000 req/min", None, false).unwrap();
+        conv.uuid.clone()
+    };
+
+    let relevancy = |m: &Moerae| -> f32 {
+        m.db()
+            .conn
+            .query_row("SELECT MAX(relevancy_score) FROM segments", [], |r| r.get(0))
+            .unwrap()
+    };
+
+    let before = relevancy(&m);
+    m.plan_forget_matching(Some(&uuid), "rate limit", None, Some(50), 0.5)
+        .unwrap();
+    assert_eq!(before, relevancy(&m), "planning a forget boosted relevancy");
+
+    // And prove the flag is actually wired, not merely off everywhere.
+    let conv = m.conversation(&uuid).unwrap();
+    conv.search_debug("rate limit", None, None).unwrap();
+    drop(conv);
+    assert!(
+        relevancy(&m) > before,
+        "normal search should still boost — the no-boost path proves nothing otherwise"
+    );
+}
+
+#[test]
+#[ignore]
+fn forget_survives_reopen() {
+    let (m, _tmp) = test_moerae(None);
+    let uuid = {
+        let mut conv = m.create_conversation().unwrap();
+        conv.put("The API rate limit is 1000 req/min", None, false).unwrap();
+        conv.put("Rust is a systems programming language", None, false).unwrap();
+        conv.uuid.clone()
+    };
+
+    let conv = m.conversation(&uuid).unwrap();
+    let node_id = conv.search_debug("rate limit", None, None).unwrap().items[0].node_id;
+    drop(conv);
+
+    m.forget_nodes(&[node_id]).unwrap();
+
+    // Reopening runs close_orphan_segments, which rebuilds when node_count disagrees
+    // with the index. If the recount were skipped this would loop forever.
+    let conv = m.conversation(&uuid).unwrap();
+    let after = conv.search("rate limit", None, None).unwrap();
+    assert!(!after.items.iter().any(|i| i.node_id == node_id));
+
+    let (node_count, _): (i64, i64) = m
+        .db()
+        .conn
+        .query_row(
+            "SELECT SUM(node_count), COUNT(*) FROM segments",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(node_count, 1, "node_count drifted from reality");
+}
+
+#[test]
+#[ignore]
+fn forget_then_put_corrected_fact() {
+    let (m, _tmp) = test_moerae(None);
+    let uuid = {
+        let mut conv = m.create_conversation().unwrap();
+        conv.put("The API rate limit is 1000 req/min", None, false).unwrap();
+        conv.uuid.clone()
+    };
+
+    let plan = m
+        .plan_forget_matching(Some(&uuid), "api rate limit", None, Some(50), 0.80)
+        .unwrap();
+    m.apply_forget(&plan).unwrap();
+
+    let mut conv = m.conversation(&uuid).unwrap();
+    conv.put("The API rate limit is 2000 req/min", None, false).unwrap();
+
+    let results = conv.search("api rate limit", None, None).unwrap();
+    assert!(results.items.iter().any(|i| i.data.contains("2000")));
+    assert!(
+        !results.items.iter().any(|i| i.data.contains("1000")),
+        "superseded fact still present"
+    );
+}
+
+#[test]
+#[ignore]
+fn apply_forget_rejects_active_open_segment() {
+    let (m, _tmp) = test_moerae(None);
+
+    let mut conv = m.create_conversation().unwrap();
+    conv.put("The API rate limit is 1000 req/min", None, false).unwrap();
+    let uuid = conv.uuid.clone();
+    let node_id = conv.search_debug("rate limit", None, None).unwrap().items[0].node_id;
+
+    let plan = m.plan_forget_nodes(&[node_id]).unwrap();
+
+    // The handle is still live and the segment is still open.
+    assert!(matches!(
+        m.apply_forget(&plan),
+        Err(moerae::ForgetError::SegmentInUse { .. })
+    ));
+
+    drop(conv);
+    m.apply_forget(&plan).unwrap();
+
+    let conv = m.conversation(&uuid).unwrap();
+    assert!(conv.search("rate limit", None, None).unwrap().items.is_empty());
+}

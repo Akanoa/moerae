@@ -25,6 +25,7 @@ fn main() {
         "put" => cmd_put(&args[1..]),
         "search" => cmd_search(&args[1..]),
         "get" => cmd_get(&args[1..]),
+        "forget" => cmd_forget(&args[1..]),
         "stats" => cmd_stats(&args[1..]),
         "convs" => cmd_convs(&args[1..]),
         "projects" => cmd_projects(),
@@ -228,6 +229,172 @@ fn cmd_get(args: &[String]) {
     }
 }
 
+fn cmd_forget(args: &[String]) {
+    let (m, _, rest) = init(args);
+
+    let mut conv_id: Option<String> = None;
+    let mut node_ids: Vec<i64> = vec![];
+    let mut query_parts: Vec<String> = vec![];
+    let mut scope = None;
+    let mut limit: Option<usize> = Some(50);
+    let mut min_score: f32 = 0.90;
+    let mut apply = false;
+    let mut json_output = false;
+    let mut i = 0;
+
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "-c" | "--conversation" => {
+                i += 1;
+                if i < rest.len() {
+                    conv_id = Some(rest[i].clone());
+                }
+            }
+            "--node" => {
+                i += 1;
+                if i < rest.len() {
+                    match rest[i].parse::<i64>() {
+                        Ok(id) => node_ids.push(id),
+                        Err(_) => {
+                            eprintln!("error: invalid node id '{}'", rest[i]);
+                            process::exit(1);
+                        }
+                    }
+                }
+            }
+            "--query" => {
+                i += 1;
+                if i < rest.len() {
+                    query_parts.push(rest[i].clone());
+                }
+            }
+            "--project-scope" => scope = Some(Scope::Project),
+            "-n" | "--limit" => {
+                i += 1;
+                if i < rest.len() {
+                    limit = rest[i].parse().ok();
+                }
+            }
+            "--min-score" => {
+                i += 1;
+                if i < rest.len() {
+                    match rest[i].parse::<f32>() {
+                        Ok(s) => min_score = s,
+                        Err(_) => {
+                            eprintln!("error: invalid --min-score '{}'", rest[i]);
+                            process::exit(1);
+                        }
+                    }
+                }
+            }
+            "--yes" => apply = true,
+            "--json" => json_output = true,
+            _ => query_parts.push(rest[i].clone()),
+        }
+        i += 1;
+    }
+
+    let query = query_parts.join(" ");
+    let has_query = !query.trim().is_empty();
+
+    if node_ids.is_empty() && !has_query {
+        eprintln!("error: nothing to forget; use --node <id> or --query <text>");
+        process::exit(1);
+    }
+    if !node_ids.is_empty() && has_query {
+        eprintln!("error: use --node or --query, not both");
+        process::exit(1);
+    }
+    // A query without a scope would silently match nothing: searching without -c
+    // creates a fresh empty conversation. Silence is unacceptable for a destructive
+    // command, so refuse rather than report "no nodes matched".
+    if has_query && conv_id.is_none() && scope.is_none() {
+        eprintln!("error: --query requires -c <uuid> or --project-scope");
+        process::exit(1);
+    }
+
+    let plan = if has_query {
+        m.plan_forget_matching(conv_id.as_deref(), &query, scope, limit, min_score)
+    } else {
+        m.plan_forget_nodes(&node_ids)
+    };
+
+    let plan = match plan {
+        Ok(p) => p,
+        Err(moerae::ForgetError::NoMatch) => {
+            // Not an error: forget must stay idempotent for scripts.
+            println!("no nodes matched");
+            return;
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            process::exit(1);
+        }
+    };
+
+    if json_output {
+        print_forget_json(&plan);
+    } else {
+        for t in &plan.targets {
+            let score = match t.score {
+                Some(s) => format!("{s:.4}"),
+                None => "-".to_string(),
+            };
+            println!("{}\t{}\t{}\t{}", score, t.segment_id, t.node_id, t.data);
+        }
+        for imp in &plan.impacts {
+            let after = imp.node_count_before - imp.nodes_removed;
+            if after <= 0 {
+                println!(
+                    "segment {}: {} -> 0 nodes (segment dropped)",
+                    imp.segment_id, imp.node_count_before
+                );
+            } else {
+                println!(
+                    "segment {}: {} -> {} nodes ({} removed)",
+                    imp.segment_id, imp.node_count_before, after, imp.nodes_removed
+                );
+            }
+        }
+        if plan.has_more {
+            println!("note: more candidates exist above the limit; raise -n to see them");
+        }
+        if plan.skipped_mismatched > 0 {
+            println!(
+                "note: {} segment(s) skipped (embedding model changed); \
+                 target them with --node or rebuild first",
+                plan.skipped_mismatched
+            );
+        }
+    }
+
+    if !apply {
+        if !json_output {
+            println!(
+                "{} node(s) in {} segment(s) would be forgotten. Re-run with --yes to apply.",
+                plan.targets.len(),
+                plan.impacts.len()
+            );
+        }
+        return;
+    }
+
+    match m.apply_forget(&plan) {
+        Ok(outcome) => {
+            if !json_output {
+                println!(
+                    "forgot {} node(s); {} segment(s) rewritten, {} dropped",
+                    outcome.nodes_removed, outcome.segments_rewritten, outcome.segments_dropped
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            process::exit(1);
+        }
+    }
+}
+
 fn cmd_stats(args: &[String]) {
     let (m, project, _) = init(args);
 
@@ -344,7 +511,7 @@ const BASH_COMPLETIONS: &str = r#"_moerae() {
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    cmds="put search get stats convs projects completions"
+    cmds="put search get forget stats convs projects completions"
 
     if [[ ${COMP_CWORD} -eq 1 ]]; then
         COMPREPLY=( $(compgen -W "${cmds}" -- "${cur}") )
@@ -373,6 +540,9 @@ const BASH_COMPLETIONS: &str = r#"_moerae() {
         get)
             opts="-p --project"
             ;;
+        forget)
+            opts="-p --project -c --conversation --node --query --min-score -n --limit --project-scope --yes --json"
+            ;;
         stats|convs)
             opts="-p --project"
             ;;
@@ -392,6 +562,7 @@ _moerae() {
         'put:Store content'
         'search:Search for content'
         'get:Fetch content by node ID'
+        'forget:Remove outdated content'
         'stats:Show project statistics'
         'convs:List conversations'
         'projects:List all projects'
@@ -431,6 +602,18 @@ _moerae() {
                         '(-p --project)'{-p,--project}'[Project name]:project:->projects' \
                         ':node_id:'
                     ;;
+                forget)
+                    _arguments \
+                        '(-p --project)'{-p,--project}'[Project name]:project:->projects' \
+                        '(-c --conversation)'{-c,--conversation}'[Conversation UUID]:uuid:' \
+                        '*--node[Forget a specific node]:node_id:' \
+                        '--query[Forget nodes matching this text]:query:' \
+                        '--min-score[Similarity floor (default 0.90)]:score:' \
+                        '(-n --limit)'{-n,--limit}'[Max candidates]:limit:' \
+                        '--project-scope[Match project scope]' \
+                        '--yes[Apply instead of previewing]' \
+                        '--json[JSON output]'
+                    ;;
                 stats|convs)
                     _arguments \
                         '(-p --project)'{-p,--project}'[Project name]:project:->projects'
@@ -458,6 +641,7 @@ const FISH_COMPLETIONS: &str = r#"# Commands
 complete -c moerae -n "__fish_use_subcommand" -a put -d "Store content"
 complete -c moerae -n "__fish_use_subcommand" -a search -d "Search for content"
 complete -c moerae -n "__fish_use_subcommand" -a get -d "Fetch content by node ID"
+complete -c moerae -n "__fish_use_subcommand" -a forget -d "Remove outdated content"
 complete -c moerae -n "__fish_use_subcommand" -a stats -d "Show project statistics"
 complete -c moerae -n "__fish_use_subcommand" -a convs -d "List conversations"
 complete -c moerae -n "__fish_use_subcommand" -a projects -d "List all projects"
@@ -477,6 +661,16 @@ complete -c moerae -n "__fish_seen_subcommand_from search" -s c -l conversation 
 complete -c moerae -n "__fish_seen_subcommand_from search" -l project-scope -d "Search project scope"
 complete -c moerae -n "__fish_seen_subcommand_from search" -s n -l limit -d "Max results"
 complete -c moerae -n "__fish_seen_subcommand_from search" -l json -d "JSON output"
+
+# forget options
+complete -c moerae -n "__fish_seen_subcommand_from forget" -s c -l conversation -d "Conversation UUID"
+complete -c moerae -n "__fish_seen_subcommand_from forget" -l node -d "Forget a specific node"
+complete -c moerae -n "__fish_seen_subcommand_from forget" -l query -d "Forget nodes matching this text"
+complete -c moerae -n "__fish_seen_subcommand_from forget" -l min-score -d "Similarity floor (default 0.90)"
+complete -c moerae -n "__fish_seen_subcommand_from forget" -s n -l limit -d "Max candidates"
+complete -c moerae -n "__fish_seen_subcommand_from forget" -l project-scope -d "Match project scope"
+complete -c moerae -n "__fish_seen_subcommand_from forget" -l yes -d "Apply instead of previewing"
+complete -c moerae -n "__fish_seen_subcommand_from forget" -l json -d "JSON output"
 
 # completions options
 complete -c moerae -n "__fish_seen_subcommand_from completions" -a "bash zsh fish"
@@ -501,6 +695,38 @@ fn print_json(results: &moerae::SearchResultsDebug) {
     println!("]");
 }
 
+fn print_forget_json(plan: &moerae::ForgetPlan) {
+    print!("{{\"targets\":[");
+    for (i, t) in plan.targets.iter().enumerate() {
+        if i > 0 {
+            print!(",");
+        }
+        let data = t.data.replace('\\', "\\\\").replace('"', "\\\"");
+        let score = match t.score {
+            Some(s) => format!("{s:.4}"),
+            None => "null".to_string(),
+        };
+        print!(
+            "{{\"node_id\":{},\"segment_id\":{},\"score\":{},\"data\":\"{}\"}}",
+            t.node_id, t.segment_id, score, data
+        );
+    }
+    print!("],\"segments\":[");
+    for (i, imp) in plan.impacts.iter().enumerate() {
+        if i > 0 {
+            print!(",");
+        }
+        print!(
+            "{{\"segment_id\":{},\"node_count_before\":{},\"nodes_removed\":{}}}",
+            imp.segment_id, imp.node_count_before, imp.nodes_removed
+        );
+    }
+    println!(
+        "],\"has_more\":{},\"skipped_mismatched\":{}}}",
+        plan.has_more, plan.skipped_mismatched
+    );
+}
+
 fn eprintln_restore(saved_fd: i32, msg: &str) {
     unsafe {
         libc::dup2(saved_fd, libc::STDERR_FILENO);
@@ -517,6 +743,7 @@ Commands:
   put <text>              Store content
   search <query>          Search for content
   get <node_id>           Fetch full content by node ID
+  forget                  Remove outdated content (dry-run unless --yes)
   stats                   Show project statistics
   convs                   List conversations
   projects                List all projects
@@ -537,6 +764,16 @@ Search options:
   -n, --limit <N>         Max results (default: 10)
   --json                  Output as JSON
 
+Forget options:
+  -c, --conversation <id> Conversation to forget from (required with --query)
+  --node <id>             Forget a specific node (repeatable)
+  --query <text>          Forget nodes semantically matching this text
+  --min-score <f>         Similarity floor for --query (default: 0.90)
+  -n, --limit <N>         Max candidates to consider (default: 50)
+  --project-scope         Match against promoted segments across the project
+  --yes                   Apply the plan (without it, forget only previews)
+  --json                  Output the plan as JSON
+
 Examples:
   moerae put -p myproject \"The capital of France is Paris\"
   moerae search -p myproject \"capital of France\"
@@ -544,6 +781,9 @@ Examples:
   moerae search -p myproject --project-scope \"config\"
   cat document.txt | moerae put -p myproject --stdin -m \"document summary\"
   moerae get -p myproject 42
+  moerae forget -p myproject --node 42
+  moerae forget -p myproject -c <uuid> --query \"old rate limit\"
+  moerae forget -p myproject -c <uuid> --query \"old rate limit\" --yes
   moerae stats -p myproject
   moerae projects
   moerae completions bash >> ~/.bashrc

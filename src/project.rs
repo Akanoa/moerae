@@ -200,22 +200,28 @@ impl Moerae {
     /// live handle. Planning must leave that set alone.
     pub fn plan_forget_matching(
         &self,
-        conversation_id: &str,
+        conversation_id: Option<&str>,
         query: &str,
         scope: Option<Scope>,
         limit: Option<usize>,
         min_score: f32,
     ) -> Result<ForgetPlan, ForgetError> {
-        if !queries::conversation_exists(&self.db.conn, conversation_id)
-            .map_err(|e| ForgetError::StorageRead(std::io::Error::other(e)))?
-        {
-            return Err(ForgetError::ConversationNotFound(
-                conversation_id.to_string(),
-            ));
-        }
-
-        let conv = Conversation::load(self, conversation_id.to_string())
-            .map_err(|e| ForgetError::StorageRead(std::io::Error::other(e.to_string())))?;
+        let conv = match conversation_id {
+            Some(uuid) => {
+                if !queries::conversation_exists(&self.db.conn, uuid)
+                    .map_err(|e| ForgetError::StorageRead(std::io::Error::other(e)))?
+                {
+                    return Err(ForgetError::ConversationNotFound(uuid.to_string()));
+                }
+                Conversation::load(self, uuid.to_string())
+                    .map_err(|e| ForgetError::StorageRead(std::io::Error::other(e.to_string())))?
+            }
+            // Project scope reads promoted segments across all conversations, so no real
+            // conversation is needed. Conversation::new inserts no row, so this leaves
+            // nothing behind — unlike `search`, which creates one.
+            None => Conversation::new(self, uuid::Uuid::new_v4().to_string())
+                .map_err(|e| ForgetError::StorageRead(std::io::Error::other(e.to_string())))?,
+        };
 
         let results = conv.search_no_boost(query, scope, limit)?;
         let skipped_mismatched = results.skipped_mismatched;

@@ -1,7 +1,10 @@
 //! Moerae: a queryable hierarchical AI memory system for AI agents.
 //!
 //! Two data verbs: `put` (store content) and `search` (retrieve content).
-//! Lifecycle handles forgetting — no delete verb needed.
+//! Lifecycle handles forgetting automatically — content ages out through disuse.
+//! `forget` exists for the case lifecycle cannot solve: content that is no longer
+//! true. A wrong fact that keeps being retrieved is the *last* thing eviction
+//! removes, so superseded content has to be removed on request.
 //!
 //! # Quick Start
 //!
@@ -17,6 +20,10 @@
 //! for item in &results.items {
 //!     println!("{}", item.data);
 //! }
+//!
+//! // Remove a specific fact once it is outdated.
+//! let node_id = results.items[0].node_id;
+//! m.forget_nodes(&[node_id]).unwrap();
 //! ```
 
 mod conversation;

@@ -21,6 +21,9 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/search --project ", "Search project scope"),
     ("/search --limit ", "Search with limit"),
     ("/get ", "Get node by ID"),
+    ("/forget ", "Preview forgetting nodes matching a query"),
+    ("/forget --node ", "Preview forgetting a specific node"),
+    ("/forget --yes", "Apply the pending forget plan"),
     ("/stats", "Show project statistics"),
     ("/convs", "List conversations"),
     ("/conversations", "List conversations"),
@@ -272,6 +275,8 @@ fn main() {
     let mut m = init_project(&project_id, &mut log_guard);
 
     let mut conv = m.create_conversation().unwrap();
+    // Segment ids are project-local, so this must be cleared on any context switch.
+    let mut pending_forget: Option<moerae::ForgetPlan> = None;
 
     println!("Conversation: {}", &conv.uuid[..8]);
     println!();
@@ -333,6 +338,65 @@ fn main() {
                         }
                         Err(e) => println!("  error: {e}"),
                     },
+                    Cmd::Forget { spec } => match spec {
+                        ForgetSpec::Apply { picks } => match pending_forget.take() {
+                            None => println!("  no pending forget plan; run /forget <query> first"),
+                            Some(plan) => {
+                                let plan = match narrow_plan(&m, plan, &picks) {
+                                    Ok(p) => p,
+                                    Err(msg) => {
+                                        println!("  {msg}");
+                                        continue;
+                                    }
+                                };
+                                // Drop the handle so the open segment is no longer "in use",
+                                // then reload to refresh the manager's open-segment pointers.
+                                let uuid = conv.uuid.clone();
+                                drop(conv);
+                                match m.apply_forget(&plan) {
+                                    Ok(o) => println!(
+                                        "  forgot {} node(s); {} segment(s) rewritten, {} dropped",
+                                        o.nodes_removed, o.segments_rewritten, o.segments_dropped
+                                    ),
+                                    Err(e) => println!("  error: {e}"),
+                                }
+                                conv = match m.conversation(&uuid) {
+                                    Ok(c) => c,
+                                    Err(_) => m.create_conversation().unwrap(),
+                                };
+                            }
+                        },
+                        ForgetSpec::Node { node_id } => match m.plan_forget_nodes(&[node_id]) {
+                            Ok(plan) => {
+                                print_forget_plan(&plan);
+                                pending_forget = Some(plan);
+                            }
+                            Err(e) => println!("  error: {e}"),
+                        },
+                        ForgetSpec::Query {
+                            query,
+                            scope,
+                            min_score,
+                        } => {
+                            let uuid = conv.uuid.clone();
+                            match m.plan_forget_matching(
+                                Some(&uuid),
+                                &query,
+                                scope,
+                                Some(50),
+                                min_score,
+                            ) {
+                                Ok(plan) => {
+                                    print_forget_plan(&plan);
+                                    pending_forget = Some(plan);
+                                }
+                                Err(moerae::ForgetError::NoMatch) => {
+                                    println!("  no nodes matched at min-score {min_score:.2}")
+                                }
+                                Err(e) => println!("  error: {e}"),
+                            }
+                        }
+                    },
                     Cmd::Get { node_id } => match m.get(node_id) {
                         Ok(content) => {
                             println!("  data: {}", content.data);
@@ -368,6 +432,7 @@ fn main() {
                     Cmd::Switch { prefix } => {
                         match resolve_conversation_prefix(&m, &prefix) {
                             PrefixMatch::Exact(full_uuid) => {
+                                discard_pending_forget(&mut pending_forget);
                                 drop(conv);
                                 match m.conversation(&full_uuid) {
                                     Ok(c) => {
@@ -399,6 +464,7 @@ fn main() {
                         }
                     }
                     Cmd::NewConv => {
+                        discard_pending_forget(&mut pending_forget);
                         drop(conv);
                         conv = m.create_conversation().unwrap();
                         println!("  new conversation: {}", &conv.uuid[..8]);
@@ -449,6 +515,7 @@ fn main() {
                         Err(e) => println!("  error: {e}"),
                     },
                     Cmd::SwitchProject { name } => {
+                        discard_pending_forget(&mut pending_forget);
                         drop(conv);
                         drop(m);
                         project_id = name;
@@ -551,6 +618,9 @@ enum Cmd {
     Get {
         node_id: i64,
     },
+    Forget {
+        spec: ForgetSpec,
+    },
     Stats,
     Conversations,
     Switch {
@@ -570,6 +640,150 @@ enum Cmd {
     Help,
     Quit,
     Unknown(String),
+}
+
+enum ForgetSpec {
+    Node {
+        node_id: i64,
+    },
+    Query {
+        query: String,
+        scope: Option<Scope>,
+        min_score: f32,
+    },
+    /// Apply the pending plan; `picks` narrows it to 1-based candidate numbers.
+    Apply {
+        picks: Vec<usize>,
+    },
+}
+
+/// Parses everything after `/forget`.
+fn parse_forget(rest: &str) -> Cmd {
+    let mut scope = None;
+    let mut min_score = 0.90_f32;
+    let mut node_id: Option<i64> = None;
+    let mut apply = false;
+    let mut picks: Vec<usize> = vec![];
+    let mut query_parts: Vec<String> = vec![];
+
+    let tokens: Vec<&str> = rest.split_whitespace().collect();
+    let mut i = 0;
+    while i < tokens.len() {
+        match tokens[i] {
+            "--yes" => apply = true,
+            "--project" => scope = Some(Scope::Project),
+            "--node" => {
+                i += 1;
+                match tokens.get(i).and_then(|t| t.parse::<i64>().ok()) {
+                    Some(id) => node_id = Some(id),
+                    None => return Cmd::Unknown("invalid node id".into()),
+                }
+            }
+            "--min-score" => {
+                i += 1;
+                match tokens.get(i).and_then(|t| t.parse::<f32>().ok()) {
+                    Some(s) => min_score = s,
+                    None => return Cmd::Unknown("invalid min-score".into()),
+                }
+            }
+            other => {
+                // Bare numbers after --yes are candidate picks; otherwise it's query text.
+                match (apply, other.parse::<usize>()) {
+                    (true, Ok(n)) => picks.push(n),
+                    _ => query_parts.push(other.to_string()),
+                }
+            }
+        }
+        i += 1;
+    }
+
+    if apply {
+        return Cmd::Forget {
+            spec: ForgetSpec::Apply { picks },
+        };
+    }
+    if let Some(node_id) = node_id {
+        return Cmd::Forget {
+            spec: ForgetSpec::Node { node_id },
+        };
+    }
+
+    let query = query_parts.join(" ");
+    if query.trim().is_empty() {
+        return Cmd::Unknown("usage: /forget <query> | /forget --node <id> | /forget --yes".into());
+    }
+
+    Cmd::Forget {
+        spec: ForgetSpec::Query {
+            query,
+            scope,
+            min_score,
+        },
+    }
+}
+
+fn print_forget_plan(plan: &moerae::ForgetPlan) {
+    for (i, t) in plan.targets.iter().enumerate() {
+        let score = match t.score {
+            Some(s) => format!("score={s:.4}"),
+            None => "explicit".to_string(),
+        };
+        println!("  [{}] {} seg={} node={}", i + 1, score, t.segment_id, t.node_id);
+        println!("      {}", t.data);
+    }
+    for imp in &plan.impacts {
+        let after = imp.node_count_before - imp.nodes_removed;
+        if after <= 0 {
+            println!(
+                "  segment {}: {} -> 0 nodes (segment dropped)",
+                imp.segment_id, imp.node_count_before
+            );
+        } else {
+            println!(
+                "  segment {}: {} -> {} nodes ({} removed)",
+                imp.segment_id, imp.node_count_before, after, imp.nodes_removed
+            );
+        }
+    }
+    if plan.has_more {
+        println!("  note: more candidates exist above the limit");
+    }
+    if plan.skipped_mismatched > 0 {
+        println!(
+            "  note: {} segment(s) skipped (embedding model changed)",
+            plan.skipped_mismatched
+        );
+    }
+    println!("  /forget --yes to apply, or /forget --yes <n> <n> for a subset");
+}
+
+fn discard_pending_forget(pending: &mut Option<moerae::ForgetPlan>) {
+    if pending.take().is_some() {
+        println!("  (pending forget plan discarded)");
+    }
+}
+
+/// Narrows a plan to the picked 1-based candidate numbers, recomputing impacts.
+fn narrow_plan(
+    m: &Moerae,
+    plan: moerae::ForgetPlan,
+    picks: &[usize],
+) -> Result<moerae::ForgetPlan, String> {
+    if picks.is_empty() {
+        return Ok(plan);
+    }
+
+    if let Some(bad) = picks.iter().find(|n| **n == 0 || **n > plan.targets.len()) {
+        return Err(format!(
+            "no candidate {bad}; the plan has {}",
+            plan.targets.len()
+        ));
+    }
+
+    let node_ids: Vec<i64> = picks.iter().map(|n| plan.targets[n - 1].node_id).collect();
+
+    // Rebuild through the planner so impacts and emptied_segments stay consistent.
+    m.plan_forget_nodes(&node_ids).map_err(|e| e.to_string())
 }
 
 fn parse_command(line: &str) -> Cmd {
@@ -613,6 +827,8 @@ fn parse_command(line: &str) -> Cmd {
             Ok(id) => Cmd::Get { node_id: id },
             Err(_) => Cmd::Unknown("invalid node_id".into()),
         }
+    } else if line == "/forget" || line.starts_with("/forget ") {
+        parse_forget(line.strip_prefix("/forget").unwrap().trim())
     } else if line == "/stats" {
         Cmd::Stats
     } else if line == "/conversations" || line == "/convs" {
@@ -725,6 +941,10 @@ fn print_help() {
     println!("  /search --project <query>      Search promoted segments across project");
     println!("  /search --limit N <query>      Search with result limit");
     println!("  /get <node_id>                 Fetch full content by node ID");
+    println!("  /forget <query>                Preview forgetting matching nodes");
+    println!("  /forget --node <id>            Preview forgetting a specific node");
+    println!("  /forget --min-score N <query>  Override the similarity floor (0.90)");
+    println!("  /forget --yes [n n ...]        Apply the pending plan, or just those picks");
     println!("  /stats                         Show project statistics");
     println!("  /convs                         List conversations");
     println!("  /new                           Start new conversation");
