@@ -159,7 +159,7 @@ impl<'a> Conversation<'a> {
         limit: Option<usize>,
     ) -> Result<SearchResults, SearchError> {
         let (items_with_scores, has_more, skipped_mismatched) =
-            self.search_internal(query, scope, limit)?;
+            self.search_internal(query, scope, limit, true)?;
 
         let items = items_with_scores
             .into_iter()
@@ -183,8 +183,31 @@ impl<'a> Conversation<'a> {
         scope: Option<Scope>,
         limit: Option<usize>,
     ) -> Result<SearchResultsDebug, SearchError> {
+        self.search_debug_inner(query, scope, limit, true)
+    }
+
+    /// Like `search_debug`, but does not boost the relevancy of the segments it hits.
+    ///
+    /// Used when planning a forget: boosting the segments that are about to be pruned
+    /// would be backwards, and the natural dry-run-then-apply flow would do it twice.
+    pub(crate) fn search_no_boost(
+        &self,
+        query: &str,
+        scope: Option<Scope>,
+        limit: Option<usize>,
+    ) -> Result<SearchResultsDebug, SearchError> {
+        self.search_debug_inner(query, scope, limit, false)
+    }
+
+    fn search_debug_inner(
+        &self,
+        query: &str,
+        scope: Option<Scope>,
+        limit: Option<usize>,
+        boost: bool,
+    ) -> Result<SearchResultsDebug, SearchError> {
         let (items_with_scores, has_more, skipped_mismatched) =
-            self.search_internal(query, scope, limit)?;
+            self.search_internal(query, scope, limit, boost)?;
 
         let items = items_with_scores
             .into_iter()
@@ -215,6 +238,7 @@ impl<'a> Conversation<'a> {
         query: &str,
         scope: Option<Scope>,
         limit: Option<usize>,
+        boost: bool,
     ) -> Result<(Vec<(i64, String, Option<String>, f32, i64, String)>, bool, usize), SearchError> {
         // Validate
         if query.trim().is_empty() {
@@ -347,7 +371,7 @@ impl<'a> Conversation<'a> {
         }
 
         // Update relevancy: +1 hit_boost per distinct segment, in one transaction
-        if !hit_segments.is_empty() {
+        if boost && !hit_segments.is_empty() {
             let _ = self.moerae.db.conn.unchecked_transaction().and_then(|tx| {
                 for seg_id in &hit_segments {
                     let _ = queries::update_segment_hit(&tx, *seg_id, config.hit_boost);

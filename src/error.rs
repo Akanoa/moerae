@@ -66,6 +66,32 @@ pub enum GetError {
 }
 
 #[derive(Debug, thiserror::Error)]
+pub enum ForgetError {
+    #[error("node not found: {0}")]
+    NodeNotFound(i64),
+    #[error("conversation not found: {0}")]
+    ConversationNotFound(String),
+    #[error(
+        "segment {segment_id} is the open segment of active conversation {conversation_id}; \
+         drop the conversation handle first"
+    )]
+    SegmentInUse {
+        segment_id: i64,
+        conversation_id: String,
+    },
+    #[error("no nodes matched")]
+    NoMatch,
+    #[error("storage read error: {0}")]
+    StorageRead(io::Error),
+    #[error("storage write error: {0}")]
+    StorageWrite(io::Error),
+    #[error("index rebuild failed: {0}")]
+    RebuildFailed(String),
+    #[error("search failed: {0}")]
+    Search(#[from] SearchError),
+}
+
+#[derive(Debug, thiserror::Error)]
 pub enum RebuildError {
     #[error("embedding failed: {0}")]
     EmbeddingFailed(String),
