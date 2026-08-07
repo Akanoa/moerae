@@ -1,28 +1,48 @@
 use moerae::types::Scope;
 use moerae::{Config, Moerae};
 
-fn test_moerae(config: Option<Config>) -> (Moerae, tempfile::TempDir) {
-    let tmp = tempfile::tempdir().unwrap();
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::OnceLock;
+
+/// One tempdir for the whole process, with MOERAE_HOME set exactly once.
+///
+/// MOERAE_HOME is process-global, so setting and clearing it per test raced: a test
+/// could observe it unset mid-window and fall through to the real ~/.moerae. Tests are
+/// isolated by project id instead — each gets its own hashed project directory.
+fn base_dir() -> &'static tempfile::TempDir {
+    static BASE: OnceLock<tempfile::TempDir> = OnceLock::new();
+    BASE.get_or_init(|| {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("MOERAE_HOME", tmp.path()) };
+        tmp
+    })
+}
+
+fn test_moerae(config: Option<Config>) -> Moerae {
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    let project_id = format!("test-project-{}", COUNTER.fetch_add(1, Ordering::SeqCst));
+    open_project(&project_id, config)
+}
+
+/// Opens a project by name, so a test can reopen the same one to mimic a second process.
+fn open_project(project_id: &str, config: Option<Config>) -> Moerae {
+    base_dir();
     let model_path = moerae::embedding::model::default_model_path();
 
-    let mut builder = Moerae::builder("test-project");
+    let mut builder = Moerae::builder(project_id);
     builder = builder.model_path(&model_path);
     if let Some(c) = config {
         builder = builder.config(c);
     }
 
-    // Override MOERAE_HOME so project dir goes into tempdir
-    unsafe { std::env::set_var("MOERAE_HOME", tmp.path()) };
-    let m = builder.build().unwrap();
-    unsafe { std::env::remove_var("MOERAE_HOME") };
-
-    (m, tmp)
+    builder.build().unwrap()
 }
 
 #[test]
 #[ignore] // Requires model file
 fn smoke_test_put_and_search() {
-    let (m, _tmp) = test_moerae(None);
+    let m = test_moerae(None);
     let mut conv = m.create_conversation().unwrap();
 
     conv.put("The capital of France is Paris", None, false).unwrap();
@@ -37,7 +57,7 @@ fn smoke_test_put_and_search() {
 #[test]
 #[ignore]
 fn empty_data_rejected() {
-    let (m, _tmp) = test_moerae(None);
+    let m = test_moerae(None);
     let mut conv = m.create_conversation().unwrap();
 
     let err = conv.put("", None, false);
@@ -50,7 +70,7 @@ fn empty_data_rejected() {
 #[test]
 #[ignore]
 fn empty_query_rejected() {
-    let (m, _tmp) = test_moerae(None);
+    let m = test_moerae(None);
     let conv = m.create_conversation().unwrap();
 
     let err = conv.search("", None, None);
@@ -60,7 +80,7 @@ fn empty_query_rejected() {
 #[test]
 #[ignore]
 fn duplicate_put_is_idempotent() {
-    let (m, _tmp) = test_moerae(None);
+    let m = test_moerae(None);
     let mut conv = m.create_conversation().unwrap();
 
     conv.put("Hello, world!", None, false).unwrap();
@@ -73,7 +93,7 @@ fn duplicate_put_is_idempotent() {
 #[test]
 #[ignore]
 fn persist_routes_to_separate_segment() {
-    let (m, _tmp) = test_moerae(None);
+    let m = test_moerae(None);
     let mut conv = m.create_conversation().unwrap();
 
     conv.put("regular data", None, false).unwrap();
@@ -87,7 +107,7 @@ fn persist_routes_to_separate_segment() {
 #[test]
 #[ignore]
 fn conversation_isolation() {
-    let (m, _tmp) = test_moerae(None);
+    let m = test_moerae(None);
 
     let mut conv1 = m.create_conversation().unwrap();
     conv1.put("Alpha project uses Python", None, false).unwrap();
@@ -111,7 +131,7 @@ fn conversation_isolation() {
 #[test]
 #[ignore]
 fn get_returns_full_content() {
-    let (m, _tmp) = test_moerae(None);
+    let m = test_moerae(None);
     let mut conv = m.create_conversation().unwrap();
 
     conv.put("specific test data for get", None, false).unwrap();
@@ -127,7 +147,7 @@ fn get_returns_full_content() {
 #[test]
 #[ignore]
 fn conversation_resume() {
-    let (m, _tmp) = test_moerae(None);
+    let m = test_moerae(None);
 
     let mut conv = m.create_conversation().unwrap();
     conv.put("persisted memory", None, false).unwrap();
@@ -144,7 +164,7 @@ fn conversation_resume() {
 #[test]
 #[ignore]
 fn delete_conversation_removes_data() {
-    let (m, _tmp) = test_moerae(None);
+    let m = test_moerae(None);
 
     let mut conv = m.create_conversation().unwrap();
     conv.put("data to delete", None, false).unwrap();
@@ -160,7 +180,7 @@ fn delete_conversation_removes_data() {
 #[test]
 #[ignore]
 fn list_conversations_works() {
-    let (m, _tmp) = test_moerae(None);
+    let m = test_moerae(None);
 
     let conv1 = m.create_conversation().unwrap();
     let conv2 = m.create_conversation().unwrap();
@@ -180,7 +200,7 @@ fn list_conversations_works() {
 #[test]
 #[ignore]
 fn search_with_limit() {
-    let (m, _tmp) = test_moerae(None);
+    let m = test_moerae(None);
     let mut conv = m.create_conversation().unwrap();
 
     for i in 0..5 {
@@ -199,7 +219,7 @@ fn search_with_limit() {
 #[test]
 #[ignore]
 fn search_debug_returns_scores() {
-    let (m, _tmp) = test_moerae(None);
+    let m = test_moerae(None);
     let mut conv = m.create_conversation().unwrap();
 
     conv.put("The sky is blue", None, false).unwrap();
@@ -217,7 +237,7 @@ fn search_debug_returns_scores() {
 fn metadata_required_for_large_content() {
     let mut config = Config::default();
     config.max_indexable_tokens = 5; // very small for testing
-    let (m, _tmp) = test_moerae(Some(config));
+    let m = test_moerae(Some(config));
     let mut conv = m.create_conversation().unwrap();
 
     // This text will exceed 5 tokens
@@ -240,7 +260,7 @@ fn metadata_required_for_large_content() {
 #[test]
 #[ignore]
 fn forget_by_node_id_removes_from_search() {
-    let (m, _tmp) = test_moerae(None);
+    let m = test_moerae(None);
     let uuid = {
         let mut conv = m.create_conversation().unwrap();
         conv.put("The API rate limit is 1000 req/min", None, false).unwrap();
@@ -271,7 +291,7 @@ fn forget_by_node_id_removes_from_search() {
 #[test]
 #[ignore]
 fn forget_by_query_plans_candidates() {
-    let (m, _tmp) = test_moerae(None);
+    let m = test_moerae(None);
     let uuid = {
         let mut conv = m.create_conversation().unwrap();
         conv.put("The API rate limit is 1000 req/min", None, false).unwrap();
@@ -298,7 +318,7 @@ fn forget_by_query_plans_candidates() {
 #[test]
 #[ignore]
 fn forget_plan_does_not_boost_relevancy() {
-    let (m, _tmp) = test_moerae(None);
+    let m = test_moerae(None);
     let uuid = {
         let mut conv = m.create_conversation().unwrap();
         conv.put("The API rate limit is 1000 req/min", None, false).unwrap();
@@ -330,7 +350,7 @@ fn forget_plan_does_not_boost_relevancy() {
 #[test]
 #[ignore]
 fn forget_survives_reopen() {
-    let (m, _tmp) = test_moerae(None);
+    let m = test_moerae(None);
     let uuid = {
         let mut conv = m.create_conversation().unwrap();
         conv.put("The API rate limit is 1000 req/min", None, false).unwrap();
@@ -365,7 +385,7 @@ fn forget_survives_reopen() {
 #[test]
 #[ignore]
 fn forget_then_put_corrected_fact() {
-    let (m, _tmp) = test_moerae(None);
+    let m = test_moerae(None);
     let uuid = {
         let mut conv = m.create_conversation().unwrap();
         conv.put("The API rate limit is 1000 req/min", None, false).unwrap();
@@ -391,7 +411,7 @@ fn forget_then_put_corrected_fact() {
 #[test]
 #[ignore]
 fn apply_forget_rejects_active_open_segment() {
-    let (m, _tmp) = test_moerae(None);
+    let m = test_moerae(None);
 
     let mut conv = m.create_conversation().unwrap();
     conv.put("The API rate limit is 1000 req/min", None, false).unwrap();
@@ -411,4 +431,33 @@ fn apply_forget_rejects_active_open_segment() {
 
     let conv = m.conversation(&uuid).unwrap();
     assert!(conv.search("rate limit", None, None).unwrap().items.is_empty());
+}
+
+#[test]
+#[ignore]
+fn forget_by_query_finds_segment_left_open_by_a_previous_process() {
+    // Every `moerae put` is its own process: it leaves the segment state='open' with no
+    // index file on disk, and the next open repairs it. Planning a forget must run that
+    // repair too, or it searches a segment with no index and silently matches nothing.
+    let project = "test-project-crossprocess";
+
+    let uuid = {
+        let m = open_project(project, None);
+        let mut conv = m.create_conversation().unwrap();
+        conv.put("The API rate limit is 1000 req/min", None, false).unwrap();
+        conv.uuid.clone()
+    };
+
+    // A second "process" over the same project directory.
+    let m = open_project(project, None);
+    let plan = m
+        .plan_forget_matching(Some(&uuid), "api rate limit", None, Some(50), 0.80)
+        .expect("planning must find content written by a previous process");
+    assert_eq!(plan.targets.len(), 1);
+
+    m.apply_forget(&plan).unwrap();
+
+    let m = open_project(project, None);
+    let conv = m.conversation(&uuid).unwrap();
+    assert!(conv.search("api rate limit", None, None).unwrap().items.is_empty());
 }

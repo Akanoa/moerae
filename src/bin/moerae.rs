@@ -4,9 +4,26 @@ use std::process;
 use moerae::types::Scope;
 use moerae::Moerae;
 
+/// The real stderr, saved before it is redirected to /dev/null to silence llama.cpp.
+/// Error messages must be written through `fail`, or they vanish.
+static SAVED_STDERR: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+
+/// Prints an error on the real stderr and exits 1.
+fn fail(msg: &str) -> ! {
+    let fd = SAVED_STDERR.load(std::sync::atomic::Ordering::Relaxed);
+    if fd >= 0 {
+        unsafe {
+            libc::dup2(fd, libc::STDERR_FILENO);
+        }
+    }
+    eprintln!("error: {msg}");
+    process::exit(1)
+}
+
 fn main() {
     // Silence llama.cpp logs on stderr
     let saved_stderr = unsafe { libc::dup(libc::STDERR_FILENO) };
+    SAVED_STDERR.store(saved_stderr, std::sync::atomic::Ordering::Relaxed);
     let devnull = std::fs::File::open("/dev/null").unwrap();
     unsafe {
         libc::dup2(std::os::fd::AsRawFd::as_raw_fd(&devnull), libc::STDERR_FILENO);
@@ -255,10 +272,7 @@ fn cmd_forget(args: &[String]) {
                 if i < rest.len() {
                     match rest[i].parse::<i64>() {
                         Ok(id) => node_ids.push(id),
-                        Err(_) => {
-                            eprintln!("error: invalid node id '{}'", rest[i]);
-                            process::exit(1);
-                        }
+                        Err(_) => fail(&format!("invalid node id '{}'", rest[i])),
                     }
                 }
             }
@@ -280,10 +294,7 @@ fn cmd_forget(args: &[String]) {
                 if i < rest.len() {
                     match rest[i].parse::<f32>() {
                         Ok(s) => min_score = s,
-                        Err(_) => {
-                            eprintln!("error: invalid --min-score '{}'", rest[i]);
-                            process::exit(1);
-                        }
+                        Err(_) => fail(&format!("invalid --min-score '{}'", rest[i])),
                     }
                 }
             }
@@ -298,19 +309,16 @@ fn cmd_forget(args: &[String]) {
     let has_query = !query.trim().is_empty();
 
     if node_ids.is_empty() && !has_query {
-        eprintln!("error: nothing to forget; use --node <id> or --query <text>");
-        process::exit(1);
+        fail("nothing to forget; use --node <id> or --query <text>");
     }
     if !node_ids.is_empty() && has_query {
-        eprintln!("error: use --node or --query, not both");
-        process::exit(1);
+        fail("use --node or --query, not both");
     }
     // A query without a scope would silently match nothing: searching without -c
     // creates a fresh empty conversation. Silence is unacceptable for a destructive
     // command, so refuse rather than report "no nodes matched".
     if has_query && conv_id.is_none() && scope.is_none() {
-        eprintln!("error: --query requires -c <uuid> or --project-scope");
-        process::exit(1);
+        fail("--query requires -c <uuid> or --project-scope");
     }
 
     let plan = if has_query {
@@ -326,10 +334,7 @@ fn cmd_forget(args: &[String]) {
             println!("no nodes matched");
             return;
         }
-        Err(e) => {
-            eprintln!("error: {e}");
-            process::exit(1);
-        }
+        Err(e) => fail(&e.to_string()),
     };
 
     if json_output {
@@ -388,10 +393,7 @@ fn cmd_forget(args: &[String]) {
                 );
             }
         }
-        Err(e) => {
-            eprintln!("error: {e}");
-            process::exit(1);
-        }
+        Err(e) => fail(&e.to_string()),
     }
 }
 
