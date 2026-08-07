@@ -16,18 +16,23 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Akanoa/moerae/releases/
 
 ### Debian / Ubuntu
 
+The package filename carries the version, so bump `VERSION` to match the
+[latest release](https://github.com/Akanoa/moerae/releases/latest).
+
 ```sh
 # Download the .deb for your architecture (amd64 or arm64)
-curl -LO https://github.com/Akanoa/moerae/releases/latest/download/moerae_0.1.0_amd64.deb
-sudo dpkg -i moerae_0.1.0_amd64.deb
+VERSION=0.3.0
+curl -LO https://github.com/Akanoa/moerae/releases/latest/download/moerae_${VERSION}_amd64.deb
+sudo dpkg -i moerae_${VERSION}_amd64.deb
 ```
 
 ### Fedora / RHEL
 
 ```sh
 # Download the .rpm for your architecture (x86_64 or aarch64)
-curl -LO https://github.com/Akanoa/moerae/releases/latest/download/moerae-0.1.0.x86_64.rpm
-sudo rpm -i moerae-0.1.0.x86_64.rpm
+VERSION=0.3.0
+curl -LO https://github.com/Akanoa/moerae/releases/latest/download/moerae-${VERSION}.x86_64.rpm
+sudo rpm -i moerae-${VERSION}.x86_64.rpm
 ```
 
 ### From source
