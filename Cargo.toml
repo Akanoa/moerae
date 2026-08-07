@@ -1,6 +1,6 @@
 [package]
 name = "moerae"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 repository = "https://github.com/Akanoa/moerae"
 authors = ["Yannick Guern"]
