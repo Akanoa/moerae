@@ -213,6 +213,20 @@ impl Moerae {
                 {
                     return Err(ForgetError::ConversationNotFound(uuid.to_string()));
                 }
+                // Repair segments left open by a previous process before searching.
+                // `Moerae::conversation` does this, but we cannot call it: it inserts
+                // into active_conversations, and the matching drop would clear the flag
+                // for a caller's live handle. Without this, a segment written by an
+                // earlier `moerae put` has no index file yet and is silently skipped —
+                // so a forget planned right after a put would match nothing.
+                lifecycle::close_orphan_segments(
+                    &self.db,
+                    uuid,
+                    &mut self.cache.borrow_mut(),
+                    &self.config,
+                )
+                .map_err(|e| ForgetError::StorageRead(std::io::Error::other(e)))?;
+
                 Conversation::load(self, uuid.to_string())
                     .map_err(|e| ForgetError::StorageRead(std::io::Error::other(e.to_string())))?
             }
