@@ -395,6 +395,93 @@ pub fn get_segment_embeddings(
     rows.collect()
 }
 
+#[derive(Debug, Clone)]
+pub struct NodeLocation {
+    pub node_id: i64,
+    pub segment_id: i64,
+    pub conversation_id: String,
+    pub data: String,
+    pub metadata: Option<String>,
+}
+
+/// Builds a `?,?,?` placeholder list for an `IN` clause.
+///
+/// Callers must guard against an empty slice: `IN ()` is a SQLite syntax error.
+/// rusqlite is built without the `array` feature, so there is no carray binding.
+fn placeholders(n: usize) -> String {
+    vec!["?"; n].join(",")
+}
+
+pub fn get_nodes_info(
+    conn: &Connection,
+    node_ids: &[i64],
+) -> rusqlite::Result<Vec<NodeLocation>> {
+    if node_ids.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let sql = format!(
+        "SELECT n.node_id, n.segment_id, s.conversation_id, n.data, n.metadata
+         FROM nodes n
+         JOIN segments s ON s.segment_id = n.segment_id
+         WHERE n.node_id IN ({})",
+        placeholders(node_ids.len())
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(node_ids), |row| {
+        Ok(NodeLocation {
+            node_id: row.get(0)?,
+            segment_id: row.get(1)?,
+            conversation_id: row.get(2)?,
+            data: row.get(3)?,
+            metadata: row.get(4)?,
+        })
+    })?;
+
+    rows.collect()
+}
+
+pub fn delete_nodes(conn: &Connection, node_ids: &[i64]) -> rusqlite::Result<usize> {
+    if node_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let sql = format!(
+        "DELETE FROM nodes WHERE node_id IN ({})",
+        placeholders(node_ids.len())
+    );
+
+    conn.execute(&sql, rusqlite::params_from_iter(node_ids))
+}
+
+/// Recomputes `node_count` from the actual rows.
+///
+/// Deliberately does not touch `last_write_timestamp` (unlike
+/// `increment_segment_node_count`): forgetting is not writing, and bumping it would
+/// reset the staleness clock and keep a just-pruned segment artificially hot.
+pub fn recount_segment_nodes(conn: &Connection, segment_id: i64) -> rusqlite::Result<i64> {
+    conn.execute(
+        "UPDATE segments
+            SET node_count = (SELECT COUNT(*) FROM nodes WHERE segment_id = ?1)
+          WHERE segment_id = ?1",
+        [segment_id],
+    )?;
+    conn.query_row(
+        "SELECT node_count FROM segments WHERE segment_id = ?1",
+        [segment_id],
+        |row| row.get(0),
+    )
+}
+
+pub fn count_segment_nodes(conn: &Connection, segment_id: i64) -> rusqlite::Result<i64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM nodes WHERE segment_id = ?1",
+        [segment_id],
+        |row| row.get(0),
+    )
+}
+
 pub fn compute_content_hash(data: &str, metadata: Option<&str>) -> Vec<u8> {
     let mut hasher = Sha256::new();
     hasher.update(data.as_bytes());
@@ -539,6 +626,125 @@ mod tests {
         // Different segment, same hash — not a duplicate
         let seg2 = insert_segment(conn, "conv-1", false, 0.3, "model-v1").unwrap();
         assert!(!check_duplicate(conn, seg2, &hash).unwrap());
+    }
+
+    /// Inserts `n` nodes into `seg_id`, returning their ids. Data is `"node-{i}"`.
+    fn seed_nodes(conn: &Connection, seg_id: i64, n: usize) -> Vec<i64> {
+        (0..n)
+            .map(|i| {
+                let data = format!("node-{i}");
+                let hash = compute_content_hash(&data, None);
+                let id = insert_node(conn, seg_id, &data, None, &vec![0u8; 16], &hash).unwrap();
+                increment_segment_node_count(conn, seg_id).unwrap();
+                id
+            })
+            .collect()
+    }
+
+    #[test]
+    fn delete_nodes_handles_zero_one_and_many() {
+        let db = test_db();
+        let conn = &db.conn;
+
+        insert_conversation(conn, "conv-1").unwrap();
+        let seg_id = insert_segment(conn, "conv-1", false, 0.3, "model-v1").unwrap();
+        let ids = seed_nodes(conn, seg_id, 5);
+
+        // Zero ids must not emit `IN ()`, which is a SQLite syntax error.
+        assert_eq!(delete_nodes(conn, &[]).unwrap(), 0);
+        assert_eq!(count_segment_nodes(conn, seg_id).unwrap(), 5);
+
+        assert_eq!(delete_nodes(conn, &ids[0..1]).unwrap(), 1);
+        assert_eq!(count_segment_nodes(conn, seg_id).unwrap(), 4);
+
+        assert_eq!(delete_nodes(conn, &ids[1..4]).unwrap(), 3);
+        assert_eq!(count_segment_nodes(conn, seg_id).unwrap(), 1);
+
+        // Unknown ids are silently skipped.
+        assert_eq!(delete_nodes(conn, &[999_999]).unwrap(), 0);
+    }
+
+    #[test]
+    fn recount_segment_nodes_matches_actual() {
+        let db = test_db();
+        let conn = &db.conn;
+
+        insert_conversation(conn, "conv-1").unwrap();
+        let seg_id = insert_segment(conn, "conv-1", false, 0.3, "model-v1").unwrap();
+        let ids = seed_nodes(conn, seg_id, 5);
+
+        assert_eq!(get_segment_info(conn, seg_id).unwrap().node_count, 5);
+
+        delete_nodes(conn, &ids[0..2]).unwrap();
+        // node_count is stale until recounted
+        assert_eq!(get_segment_info(conn, seg_id).unwrap().node_count, 5);
+
+        assert_eq!(recount_segment_nodes(conn, seg_id).unwrap(), 3);
+        assert_eq!(get_segment_info(conn, seg_id).unwrap().node_count, 3);
+    }
+
+    #[test]
+    fn recount_does_not_bump_last_write() {
+        let db = test_db();
+        let conn = &db.conn;
+
+        insert_conversation(conn, "conv-1").unwrap();
+        let seg_id = insert_segment(conn, "conv-1", false, 0.3, "model-v1").unwrap();
+        let ids = seed_nodes(conn, seg_id, 3);
+
+        // Backdate so a bump would be unmistakable.
+        conn.execute(
+            "UPDATE segments SET last_write_timestamp = ?1 WHERE segment_id = ?2",
+            params![now_unix() - 10_000, seg_id],
+        )
+        .unwrap();
+        let before = get_segment_info(conn, seg_id).unwrap().last_write_timestamp;
+
+        delete_nodes(conn, &ids[0..1]).unwrap();
+        recount_segment_nodes(conn, seg_id).unwrap();
+
+        let after = get_segment_info(conn, seg_id).unwrap().last_write_timestamp;
+        assert_eq!(before, after, "forgetting must not reset the staleness clock");
+    }
+
+    #[test]
+    fn get_nodes_info_joins_conversation() {
+        let db = test_db();
+        let conn = &db.conn;
+
+        insert_conversation(conn, "conv-1").unwrap();
+        let seg_id = insert_segment(conn, "conv-1", false, 0.3, "model-v1").unwrap();
+        let ids = seed_nodes(conn, seg_id, 3);
+
+        assert!(get_nodes_info(conn, &[]).unwrap().is_empty());
+        assert!(get_nodes_info(conn, &[999_999]).unwrap().is_empty());
+
+        let info = get_nodes_info(conn, &ids).unwrap();
+        assert_eq!(info.len(), 3);
+        for loc in &info {
+            assert_eq!(loc.segment_id, seg_id);
+            assert_eq!(loc.conversation_id, "conv-1");
+            assert!(loc.data.starts_with("node-"));
+        }
+    }
+
+    #[test]
+    fn forget_then_reput_same_content_allowed() {
+        let db = test_db();
+        let conn = &db.conn;
+
+        insert_conversation(conn, "conv-1").unwrap();
+        let seg_id = insert_segment(conn, "conv-1", false, 0.3, "model-v1").unwrap();
+
+        let hash = compute_content_hash("rate limit is 1000", None);
+        let node_id =
+            insert_node(conn, seg_id, "rate limit is 1000", None, &vec![0u8; 16], &hash).unwrap();
+        assert!(check_duplicate(conn, seg_id, &hash).unwrap());
+
+        delete_nodes(conn, &[node_id]).unwrap();
+
+        // Dedup no longer blocks the same content — forget-then-correct works.
+        assert!(!check_duplicate(conn, seg_id, &hash).unwrap());
     }
 
     #[test]

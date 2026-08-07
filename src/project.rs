@@ -6,13 +6,16 @@ use std::rc::Rc;
 use crate::config::Config;
 use crate::conversation::Conversation;
 use crate::embedding::model::{self, EmbeddingModel};
-use crate::error::{ConversationError, GetError, InitError, RebuildError};
+use crate::error::{ConversationError, ForgetError, GetError, InitError, RebuildError};
 use crate::index::cache::IndexCache;
 use crate::index::segment_index::SegmentIndex;
 use crate::segment::lifecycle;
 use crate::storage::db::Database;
 use crate::storage::queries;
-use crate::types::{ConversationInfo, NodeContent, ProjectStats};
+use crate::types::{
+    ConversationInfo, ForgetOutcome, ForgetPlan, ForgetTarget, NodeContent, ProjectStats, Scope,
+    SegmentImpact,
+};
 
 pub struct Moerae {
     pub(crate) db: Database,
@@ -81,6 +84,10 @@ impl Moerae {
 
         // Orphan file cleanup
         cleanup_orphan_files(&db)?;
+
+        // Finish any rewrite interrupted between save_to(tmp) and the rename
+        lifecycle::recover_interrupted_rewrites(&db)
+            .map_err(|e| InitError::StorageInit(std::io::Error::other(e)))?;
 
         // Init-time eviction check
         run_init_eviction(&db, &config, &mut cache.borrow_mut())?;
@@ -156,6 +163,209 @@ impl Moerae {
     pub fn segment_stats(&self) -> Result<ProjectStats, ConversationError> {
         queries::get_project_stats(&self.db.conn, self.model.model_id())
             .map_err(|e| ConversationError::StorageRead(std::io::Error::other(e)))
+    }
+
+    /// Plans the removal of specific nodes, named by id. Does not touch the model.
+    pub fn plan_forget_nodes(&self, node_ids: &[i64]) -> Result<ForgetPlan, ForgetError> {
+        let locations = queries::get_nodes_info(&self.db.conn, node_ids)
+            .map_err(|e| ForgetError::StorageRead(std::io::Error::other(e)))?;
+
+        // An id the caller named but that does not exist is a mistake worth reporting,
+        // unlike a stale plan applied later (where a vanished node is simply skipped).
+        if let Some(missing) = node_ids.iter().find(|id| {
+            !locations.iter().any(|l| l.node_id == **id)
+        }) {
+            return Err(ForgetError::NodeNotFound(*missing));
+        }
+
+        let targets = locations
+            .into_iter()
+            .map(|l| ForgetTarget {
+                node_id: l.node_id,
+                segment_id: l.segment_id,
+                conversation_id: l.conversation_id,
+                data: l.data,
+                metadata: l.metadata,
+                score: None,
+            })
+            .collect();
+
+        self.build_plan(targets, false, 0)
+    }
+
+    /// Plans the removal of nodes semantically matching `query` at or above `min_score`.
+    ///
+    /// Takes a conversation id rather than a handle on purpose: opening one would insert
+    /// into `active_conversations`, and dropping it would clear the flag for a caller's
+    /// live handle. Planning must leave that set alone.
+    pub fn plan_forget_matching(
+        &self,
+        conversation_id: &str,
+        query: &str,
+        scope: Option<Scope>,
+        limit: Option<usize>,
+        min_score: f32,
+    ) -> Result<ForgetPlan, ForgetError> {
+        if !queries::conversation_exists(&self.db.conn, conversation_id)
+            .map_err(|e| ForgetError::StorageRead(std::io::Error::other(e)))?
+        {
+            return Err(ForgetError::ConversationNotFound(
+                conversation_id.to_string(),
+            ));
+        }
+
+        let conv = Conversation::load(self, conversation_id.to_string())
+            .map_err(|e| ForgetError::StorageRead(std::io::Error::other(e.to_string())))?;
+
+        let results = conv.search_no_boost(query, scope, limit)?;
+        let skipped_mismatched = results.skipped_mismatched;
+        let has_more = results.has_more;
+
+        let targets: Vec<ForgetTarget> = results
+            .items
+            .into_iter()
+            .filter(|r| r.score >= min_score)
+            .map(|r| ForgetTarget {
+                node_id: r.node_id,
+                segment_id: r.segment_id,
+                conversation_id: r.conversation_id,
+                data: r.data,
+                metadata: r.metadata,
+                score: Some(r.score),
+            })
+            .collect();
+
+        if targets.is_empty() {
+            return Err(ForgetError::NoMatch);
+        }
+
+        self.build_plan(targets, has_more, skipped_mismatched)
+    }
+
+    /// Groups targets by segment and records what each segment would lose.
+    fn build_plan(
+        &self,
+        targets: Vec<ForgetTarget>,
+        has_more: bool,
+        skipped_mismatched: usize,
+    ) -> Result<ForgetPlan, ForgetError> {
+        let mut segment_ids: Vec<i64> = targets.iter().map(|t| t.segment_id).collect();
+        segment_ids.sort_unstable();
+        segment_ids.dedup();
+
+        let mut impacts = Vec::with_capacity(segment_ids.len());
+        let mut emptied_segments = Vec::new();
+
+        for segment_id in segment_ids {
+            let info = queries::get_segment_info(&self.db.conn, segment_id)
+                .map_err(|e| ForgetError::StorageRead(std::io::Error::other(e)))?;
+
+            let nodes_removed = targets
+                .iter()
+                .filter(|t| t.segment_id == segment_id)
+                .count() as i64;
+
+            let actual = queries::count_segment_nodes(&self.db.conn, segment_id)
+                .map_err(|e| ForgetError::StorageRead(std::io::Error::other(e)))?;
+
+            if nodes_removed >= actual {
+                emptied_segments.push(segment_id);
+            }
+
+            impacts.push(SegmentImpact {
+                segment_id,
+                node_count_before: actual,
+                nodes_removed,
+                state: info.state,
+                persist: info.persist,
+                promoted: info.promoted,
+            });
+        }
+
+        Ok(ForgetPlan {
+            targets,
+            impacts,
+            emptied_segments,
+            has_more,
+            skipped_mismatched,
+        })
+    }
+
+    /// Executes a plan. Does not touch the model.
+    ///
+    /// Nodes that have disappeared since the plan was built are silently skipped —
+    /// `node_id` is AUTOINCREMENT and never reused, so a stale plan can target a missing
+    /// node but never a different one.
+    pub fn apply_forget(&self, plan: &ForgetPlan) -> Result<ForgetOutcome, ForgetError> {
+        // Group targets by segment.
+        let mut by_segment: Vec<(i64, Vec<i64>)> = Vec::new();
+        for target in &plan.targets {
+            match by_segment.iter_mut().find(|(s, _)| *s == target.segment_id) {
+                Some((_, ids)) => ids.push(target.node_id),
+                None => by_segment.push((target.segment_id, vec![target.node_id])),
+            }
+        }
+
+        // Refuse only the genuinely dangerous case: the open segment of a conversation
+        // that still has a live handle. Rewriting a closed segment underneath one is safe.
+        for (segment_id, _) in &by_segment {
+            let info = match queries::get_segment_info(&self.db.conn, *segment_id) {
+                Ok(i) => i,
+                Err(_) => continue, // segment already gone; nothing to guard
+            };
+            if info.state == "open"
+                && self
+                    .active_conversations
+                    .borrow()
+                    .contains(&info.conversation_id)
+            {
+                return Err(ForgetError::SegmentInUse {
+                    segment_id: *segment_id,
+                    conversation_id: info.conversation_id,
+                });
+            }
+        }
+
+        let mut cache = self.cache.borrow_mut();
+        let mut outcome = ForgetOutcome {
+            nodes_removed: 0,
+            segments_rewritten: 0,
+            segments_dropped: 0,
+        };
+
+        for (segment_id, node_ids) in &by_segment {
+            if queries::get_segment_info(&self.db.conn, *segment_id).is_err() {
+                continue; // segment vanished since planning
+            }
+
+            let result = lifecycle::forget_nodes_in_segment(
+                &self.db,
+                *segment_id,
+                node_ids,
+                &self.config,
+                &mut cache,
+            )
+            .map_err(ForgetError::RebuildFailed)?;
+
+            match result {
+                lifecycle::ForgetSegmentOutcome::Rewritten { removed, .. } => {
+                    outcome.nodes_removed += removed;
+                    outcome.segments_rewritten += 1;
+                }
+                lifecycle::ForgetSegmentOutcome::Dropped { removed } => {
+                    outcome.nodes_removed += removed;
+                    outcome.segments_dropped += 1;
+                }
+            }
+        }
+
+        Ok(outcome)
+    }
+
+    /// Convenience: plan and apply in one step, for explicit node ids.
+    pub fn forget_nodes(&self, node_ids: &[i64]) -> Result<ForgetOutcome, ForgetError> {
+        let plan = self.plan_forget_nodes(node_ids)?;
+        self.apply_forget(&plan)
     }
 
     pub fn rebuild_mismatched_segments(&self) -> Result<(), RebuildError> {
