@@ -8,15 +8,33 @@ use moerae::Moerae;
 /// Error messages must be written through `fail`, or they vanish.
 static SAVED_STDERR: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 
+/// Writes a line to the real stderr, bypassing the /dev/null redirect.
+///
+/// Writes to the saved descriptor directly rather than restoring fd 2, so llama.cpp
+/// stays silenced for anything that runs afterwards.
+fn write_real_stderr(msg: &str) {
+    use std::io::Write;
+
+    let fd = SAVED_STDERR.load(std::sync::atomic::Ordering::Relaxed);
+    if fd < 0 {
+        eprintln!("{msg}");
+        return;
+    }
+    // ManuallyDrop: the File borrows the descriptor; dropping it would close it.
+    let mut out = std::mem::ManuallyDrop::new(unsafe {
+        <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(fd)
+    });
+    let _ = writeln!(out, "{msg}");
+}
+
+/// Reports a non-fatal message on the real stderr, keeping stdout pipeable.
+fn note(msg: &str) {
+    write_real_stderr(msg);
+}
+
 /// Prints an error on the real stderr and exits 1.
 fn fail(msg: &str) -> ! {
-    let fd = SAVED_STDERR.load(std::sync::atomic::Ordering::Relaxed);
-    if fd >= 0 {
-        unsafe {
-            libc::dup2(fd, libc::STDERR_FILENO);
-        }
-    }
-    eprintln!("error: {msg}");
+    write_real_stderr(&format!("error: {msg}"));
     process::exit(1)
 }
 
@@ -48,7 +66,7 @@ fn main() {
         "projects" => cmd_projects(),
         "completions" => cmd_completions(&args[1..]),
         _ => {
-            eprintln_restore(saved_stderr, &format!("unknown command: {cmd}"));
+            write_real_stderr(&format!("unknown command: {cmd}"));
             print_usage();
             process::exit(1);
         }
@@ -75,10 +93,7 @@ fn init(args: &[String]) -> (Moerae, String, Vec<String>) {
 
     let m = match Moerae::init(&project) {
         Ok(m) => m,
-        Err(e) => {
-            eprintln!("error: {e}");
-            process::exit(1);
-        }
+        Err(e) => fail(&e.to_string()),
     };
 
     (m, project, rest)
@@ -120,17 +135,13 @@ fn cmd_put(args: &[String]) {
 
     let data = data_parts.join(" ");
     if data.trim().is_empty() {
-        eprintln!("error: no data provided");
-        process::exit(1);
+        fail("no data provided");
     }
 
     let mut conv = match conv_id {
         Some(ref id) => match m.conversation(id) {
             Ok(c) => c,
-            Err(e) => {
-                eprintln!("error: {e}");
-                process::exit(1);
-            }
+            Err(e) => fail(&e.to_string()),
         },
         None => m.create_conversation().unwrap(),
     };
@@ -141,10 +152,7 @@ fn cmd_put(args: &[String]) {
                 println!("{}", conv.uuid);
             }
         }
-        Err(e) => {
-            eprintln!("error: {e}");
-            process::exit(1);
-        }
+        Err(e) => fail(&e.to_string()),
     }
 }
 
@@ -181,17 +189,13 @@ fn cmd_search(args: &[String]) {
 
     let query = query_parts.join(" ");
     if query.trim().is_empty() {
-        eprintln!("error: no query provided");
-        process::exit(1);
+        fail("no query provided");
     }
 
     let conv = match conv_id {
         Some(ref id) => match m.conversation(id) {
             Ok(c) => c,
-            Err(e) => {
-                eprintln!("error: {e}");
-                process::exit(1);
-            }
+            Err(e) => fail(&e.to_string()),
         },
         None => m.create_conversation().unwrap(),
     };
@@ -209,10 +213,7 @@ fn cmd_search(args: &[String]) {
                 }
             }
         }
-        Err(e) => {
-            eprintln!("error: {e}");
-            process::exit(1);
-        }
+        Err(e) => fail(&e.to_string()),
     }
 }
 
@@ -220,29 +221,22 @@ fn cmd_get(args: &[String]) {
     let (m, _, rest) = init(args);
 
     if rest.is_empty() {
-        eprintln!("error: node_id required");
-        process::exit(1);
+        fail("node_id required");
     }
 
     let node_id: i64 = match rest[0].parse() {
         Ok(id) => id,
-        Err(_) => {
-            eprintln!("error: invalid node_id '{}'", rest[0]);
-            process::exit(1);
-        }
+        Err(_) => fail(&format!("invalid node_id '{}'", rest[0])),
     };
 
     match m.get(node_id) {
         Ok(content) => {
             println!("{}", content.data);
             if let Some(meta) = content.metadata {
-                eprintln!("metadata: {meta}");
+                note(&format!("metadata: {meta}"));
             }
         }
-        Err(e) => {
-            eprintln!("error: {e}");
-            process::exit(1);
-        }
+        Err(e) => fail(&e.to_string()),
     }
 }
 
@@ -407,10 +401,7 @@ fn cmd_stats(args: &[String]) {
             println!("mismatched: {}", s.mismatched_segments);
             println!("nodes: {}", s.total_nodes);
         }
-        Err(e) => {
-            eprintln!("error: {e}");
-            process::exit(1);
-        }
+        Err(e) => fail(&e.to_string()),
     }
 }
 
@@ -427,10 +418,7 @@ fn cmd_convs(args: &[String]) {
                 );
             }
         }
-        Err(e) => {
-            eprintln!("error: {e}");
-            process::exit(1);
-        }
+        Err(e) => fail(&e.to_string()),
     }
 }
 
@@ -493,18 +481,14 @@ fn cmd_projects() {
 
 fn cmd_completions(args: &[String]) {
     let shell = args.first().map(|s| s.as_str()).unwrap_or_else(|| {
-        eprintln!("usage: moerae completions <bash|zsh|fish>");
-        process::exit(1);
+        fail("missing shell; usage: moerae completions <bash|zsh|fish>");
     });
 
     match shell {
         "bash" => print!("{}", BASH_COMPLETIONS),
         "zsh" => print!("{}", ZSH_COMPLETIONS),
         "fish" => print!("{}", FISH_COMPLETIONS),
-        _ => {
-            eprintln!("unknown shell: {shell}. Use bash, zsh, or fish.");
-            process::exit(1);
-        }
+        _ => fail(&format!("unknown shell: {shell}. Use bash, zsh, or fish.")),
     }
 }
 
@@ -727,13 +711,6 @@ fn print_forget_json(plan: &moerae::ForgetPlan) {
         "],\"has_more\":{},\"skipped_mismatched\":{}}}",
         plan.has_more, plan.skipped_mismatched
     );
-}
-
-fn eprintln_restore(saved_fd: i32, msg: &str) {
-    unsafe {
-        libc::dup2(saved_fd, libc::STDERR_FILENO);
-    }
-    eprintln!("{msg}");
 }
 
 fn print_usage() {
