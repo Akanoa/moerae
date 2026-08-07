@@ -58,6 +58,36 @@ moerae get -p myproject 42
 
 Useful when the original content was large and search returned only the metadata summary.
 
+## Forgetting Outdated Content
+
+Eviction removes content through disuse — it cannot help with content that is simply
+wrong. A stale fact that keeps being retrieved has a high relevancy score, so it is the
+last thing evicted. Remove it explicitly.
+
+```sh
+# Preview: forget is a DRY RUN unless --yes is passed
+moerae forget -p myproject --node 42
+moerae forget -p myproject -c <uuid> --query "old API rate limit"
+
+# Apply
+moerae forget -p myproject -c <uuid> --query "old API rate limit" --yes
+```
+
+- **`--yes` is required to remove anything.** Without it you get the candidate list and
+  nothing changes.
+- `--query` needs `-c <uuid>` or `--project-scope`; it is refused otherwise, because a
+  search without a conversation silently matches nothing.
+- `--min-score` defaults to 0.90. Lower it if the fact you mean isn't listed. A false
+  positive is unrecoverable, a false negative just means running again.
+- Removal is node-precise. Neighbouring content in the same segment is preserved.
+
+The correction workflow is forget-then-put:
+
+```sh
+moerae forget -p myproject -c $CONV --query "api rate limit is 1000" --yes
+moerae put -p myproject -c $CONV "The API rate limit is 2000 req/min"
+```
+
 ## Managing State
 
 ```sh
@@ -78,4 +108,5 @@ moerae convs -p myproject
 - **Conversations** isolate memory. Content in one conversation is invisible to searches in another unless promoted.
 - **Persistence** (`--persist`) makes content visible across all conversations in the project and prevents eviction.
 - **Eviction** is automatic. Old, rarely-accessed content is forgotten when segment limits are reached. Persistent content is never evicted.
+- **forget** is the explicit counterpart to eviction, for content that is wrong rather than stale. It previews by default and only removes with `--yes`. It is the only way to remove persistent content.
 - **Projects** are independent databases. Use `-p` to target a specific project.

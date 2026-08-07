@@ -97,8 +97,36 @@ Use this for stable project knowledge (conventions, decisions and their reasons,
 where things live, past incidents). Non-persistent content is evicted as
 segments age out, which is the intended behaviour for session scratch.
 
+Persistent content is never evicted, so `forget` is the only way to remove it — see
+[Correcting stored facts](#correcting-stored-facts).
+
 Note that `~/.moerae` is a plaintext local SQLite database. Store the *location*
 of a secret, not the secret.
+
+## Correcting stored facts
+
+Storing a correction does not remove what it corrects. Both come back from search, and
+the stale one often scores *higher* — it has been retrieved more, so its relevancy is
+higher and eviction reaches it last. Remove it explicitly:
+
+```sh
+# Preview. forget changes nothing without --yes.
+moerae forget -p "$PROJECT" -c "$CONV" --query "api rate limit is 1000"
+# 0.9421  17  42  The API rate limit is 1000 req/min
+
+# Apply, then store the correction.
+moerae forget -p "$PROJECT" -c "$CONV" --query "api rate limit is 1000" --yes
+moerae put    -p "$PROJECT" -c "$CONV" "The API rate limit is 2000 req/min"
+```
+
+Removal is node-precise — neighbouring content in the same segment survives.
+
+`--min-score` defaults to 0.90; lower it if the fact you mean isn't in the list. Use
+`--node <id>` when you already have the id from a search, which needs no threshold at all.
+
+**Always run the dry-run first and show the user what it lists.** Never pass `--yes` to a
+`--query` unprompted: the target set is computed by similarity, not named by the user, and
+removal cannot be undone. `--node` on an id the user pointed at is a different matter.
 
 ## What goes where
 
@@ -109,6 +137,7 @@ of a secret, not the secret.
 | Fetched docs, API responses, transcripts | `put --stdin -m` |
 | A conclusion, decision, or convention | `put --persist` (short, stays cheap) |
 | Small values in active use right now | keep in context — round-tripping costs more than it saves |
+| A fact that is now wrong | `forget` it, then `put` the correction |
 | Secrets, tokens, credentials | never; store where to find them |
 
 ## Working loop

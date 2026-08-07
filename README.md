@@ -2,7 +2,7 @@
     <img src="docs/moerae-logo.svg" alt="Moerae">
 </div>
 
-<p align="center">A queryable hierarchical AI memory system for AI agents.<br>Two verbs: <code>put</code> and <code>search</code>. No files, no manual indexing, no context window management.<br>Put content in, search it later. Lifecycle handles the rest.</p>
+<p align="center">A queryable hierarchical AI memory system for AI agents.<br>Two data verbs: <code>put</code> and <code>search</code>. No files, no manual indexing, no context window management.<br>Put content in, search it later. Lifecycle handles the rest — and <code>forget</code> removes what is no longer true.</p>
 
 Moerae embeds content locally using [embeddinggemma-300m](https://huggingface.co/ggml-org/embeddinggemma-300m-qat-q8_0-GGUF), stores it in SQLite with [usearch](https://github.com/unum-cloud/usearch) HNSW indexes, and manages segment lifecycle automatically: segments close at capacity, get evicted when stale, and promote to project scope when useful.
 
@@ -68,6 +68,11 @@ moerae search -p myproject --json "query"
 # Get full content by node ID
 moerae get -p myproject 42
 
+# Forget outdated content (previews by default; --yes applies)
+moerae forget -p myproject --node 42
+moerae forget -p myproject -c <uuid> --query "old rate limit"
+moerae forget -p myproject -c <uuid> --query "old rate limit" --yes
+
 # Project management
 moerae stats -p myproject
 moerae convs -p myproject
@@ -108,6 +113,9 @@ REPL commands:
 | `/search --project <query>` | Search project scope |
 | `/search --limit N <query>` | Limit results |
 | `/get <node_id>` | Fetch full content |
+| `/forget <query>` | Preview forgetting matching nodes |
+| `/forget --node <id>` | Preview forgetting a specific node |
+| `/forget --yes [n n]` | Apply the pending plan, or just those picks |
 | `/stats` | Project statistics |
 | `/convs` | List conversations |
 | `/new` | New conversation |
@@ -206,6 +214,32 @@ let content = m.get(results.items[0].node_id)?;
 println!("{}", content.data);
 ```
 
+### Forget
+
+Lifecycle removes content through disuse. `forget` handles the case it cannot: content
+that is no longer *true*. A wrong fact that keeps being retrieved has a high relevancy
+score, so eviction removes it last.
+
+```rust
+// Plan first — nothing is removed until the plan is applied.
+let plan = m.plan_forget_matching(&conv_uuid, "old api rate limit", None, Some(50), 0.90)?;
+for target in &plan.targets {
+    println!("{:.4} node={} {}", target.score.unwrap(), target.node_id, target.data);
+}
+let outcome = m.apply_forget(&plan)?;
+
+// Or, when you already know the node:
+m.forget_nodes(&[42])?;
+```
+
+Plan and apply are separate so the preview and the applied action are the same decision —
+there is no re-search in between, and no chance of the second run matching something the
+first did not show you.
+
+Removal is precise: only the named nodes go. The segment holding them is rewritten from
+its surviving embeddings, keeping the neighbours and the segment's relevancy, hit count,
+and promotion. A segment whose every node is forgotten is dropped entirely.
+
 ### Project stats
 
 ```rust
@@ -251,6 +285,7 @@ Segments are the unit of lifecycle management. Each conversation has two open se
 - **Relevancy**: starts at `base_score`, boosted by `hit_boost` on each search hit, capped at 1.0
 - **Promotion**: segments crossing `promotion_threshold` become visible at project scope
 - **Eviction**: composite priority based on relevancy, hit count, and time since last hit. Lowest-value segments evicted first. Persistence segments are never evicted.
+- **Forget**: rewrites a segment in place from its surviving embeddings, so removing one node preserves its neighbours along with the segment's relevancy, hit count, and promotion. No re-embedding is involved, so it works even on model-mismatched segments.
 
 ### Embedding
 
